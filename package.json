@@ -1,0 +1,19 @@
+{
+  "name": "telegram-shift-miniapp",
+  "version": "1.0.0",
+  "description": "Простой Telegram Mini App + Bot для учёта смен сотрудников с Google Sheets",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node src/index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dayjs": "^1.11.13",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "googleapis": "^144.0.0",
+    "telegraf": "^4.16.3",
+    "uuid": "^11.0.3"
+  }
+}
