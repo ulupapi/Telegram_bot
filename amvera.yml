@@ -1,0 +1,9 @@
+meta:
+  environment: node
+  toolchain:
+    name: npm
+    version: 20
+build:
+  install: npm install
+run:
+  command: npm start

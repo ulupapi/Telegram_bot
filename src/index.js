@@ -10,8 +10,9 @@ async function startApp() {
   console.log('Google Sheets готова.');
 
   const app = createServer();
-  const server = app.listen(config.port, () => {
-    console.log(`HTTP сервер запущен: http://localhost:${config.port}`);
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server started on port ${PORT}`);
   });
 
   const bot = createBot();
