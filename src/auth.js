@@ -59,10 +59,12 @@ function buildDevTelegramUser(payload) {
   };
 }
 
-function createSession(userId) {
+function createSession(user) {
   const token = uuidv4();
+  const safeUser = sanitizeUser(user);
   sessions.set(token, {
-    userId,
+    userId: user.id,
+    user: safeUser,
     expiresAt: Date.now() + SESSION_TTL_MS
   });
   return token;
@@ -95,7 +97,7 @@ async function signInTelegram(payload) {
   }
 
   const user = await getOrCreateUserByTelegram(telegramUser);
-  const token = createSession(user.id);
+  const token = createSession(user);
 
   return {
     token,
@@ -120,7 +122,11 @@ async function authMiddleware(req, res, next) {
       return res.status(401).json({ error: 'Сессия истекла' });
     }
 
-    const user = await getUserById(session.userId);
+    let user = session.user || null;
+    if (!user) {
+      user = await getUserById(session.userId);
+    }
+
     if (!user) {
       sessions.delete(token);
       return res.status(401).json({ error: 'Пользователь не найден' });

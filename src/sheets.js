@@ -38,6 +38,7 @@ const SHEETS = {
 let sheetsClient = null;
 const READ_CACHE_TTL_MS = 5000;
 const rowsCache = new Map();
+const pendingRowsReads = new Map();
 
 function cloneRows(rows) {
   return rows.map((row) => ({ ...row }));
@@ -177,18 +178,34 @@ async function getRows(sheetKey) {
   const cached = getCachedRows(sheetKey);
   if (cached) return cached;
 
-  const sheetsApi = await getSheetsClient();
-  const sheetName = SHEETS[sheetKey].name;
+  const pending = pendingRowsReads.get(sheetKey);
+  if (pending) {
+    const rows = await pending;
+    return cloneRows(rows);
+  }
 
-  const response = await sheetsApi.spreadsheets.values.get({
-    spreadsheetId: config.spreadsheetId,
-    range: `${sheetName}!A2:Z`
-  });
+  const readPromise = (async () => {
+    const sheetsApi = await getSheetsClient();
+    const sheetName = SHEETS[sheetKey].name;
 
-  const rows = response.data.values || [];
-  const result = rows.map((rowValues, index) => toRowObject(sheetKey, rowValues, index + 2));
-  setCachedRows(sheetKey, result);
-  return cloneRows(result);
+    const response = await sheetsApi.spreadsheets.values.get({
+      spreadsheetId: config.spreadsheetId,
+      range: `${sheetName}!A2:Z`
+    });
+
+    const rows = response.data.values || [];
+    const result = rows.map((rowValues, index) => toRowObject(sheetKey, rowValues, index + 2));
+    setCachedRows(sheetKey, result);
+    return result;
+  })();
+
+  pendingRowsReads.set(sheetKey, readPromise);
+  try {
+    const result = await readPromise;
+    return cloneRows(result);
+  } finally {
+    pendingRowsReads.delete(sheetKey);
+  }
 }
 
 async function appendRow(sheetKey, rowObject) {
@@ -495,6 +512,35 @@ async function getUserHours(user, timezone) {
   };
 }
 
+async function getUserDashboardData(user, timezone) {
+  const [allSchedules, allShifts] = await Promise.all([getRows('schedules'), getRows('shifts')]);
+
+  const schedules = allSchedules
+    .filter((item) => item.user_id === user.id && item.status === 'planned')
+    .sort((a, b) => `${a.date} ${a.start_time}`.localeCompare(`${b.date} ${b.start_time}`));
+
+  const userShifts = allShifts.filter((shift) => shift.user_id === user.id);
+  const activeShift = userShifts.find((shift) => shift.status === 'active') || null;
+  const completedShifts = userShifts
+    .filter((shift) => shift.status === 'completed')
+    .sort((a, b) => (b.start_datetime || '').localeCompare(a.start_datetime || ''));
+
+  const totals = calculateSummaryMinutes(completedShifts, timezone);
+  const hours = {
+    user_id: user.id,
+    full_name: user.full_name,
+    ...totals,
+    updated_at: nowIso()
+  };
+
+  return {
+    schedules,
+    shifts: completedShifts,
+    activeShift,
+    hours
+  };
+}
+
 async function getManagerDashboard(timezone) {
   const [users, schedules, allShifts] = await Promise.all([
     listActiveUsers(),
@@ -552,5 +598,6 @@ module.exports = {
   endShift,
   listShiftsByUser,
   getUserHours,
-  getManagerDashboard
+  getManagerDashboard,
+  getUserDashboardData
 };

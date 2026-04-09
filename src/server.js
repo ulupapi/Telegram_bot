@@ -12,7 +12,8 @@ const {
   endShift,
   listShiftsByUser,
   getUserHours,
-  getManagerDashboard
+  getManagerDashboard,
+  getUserDashboardData
 } = require('./sheets');
 
 function asyncHandler(handler) {
@@ -64,15 +65,28 @@ function createServer() {
     '/api/me',
     authMiddleware,
     asyncHandler(async (req, res) => {
-      const [activeShift, hours] = await Promise.all([
-        getActiveShiftByUser(req.user.id),
-        getUserHours(req.user, config.timezone)
-      ]);
+      const dashboard = await getUserDashboardData(req.user, config.timezone);
 
       res.json({
         user: sanitizeUser(req.user),
-        active_shift: activeShift,
-        hours
+        active_shift: dashboard.activeShift,
+        hours: dashboard.hours
+      });
+    })
+  );
+
+  app.get(
+    '/api/my/bootstrap',
+    authMiddleware,
+    asyncHandler(async (req, res) => {
+      const dashboard = await getUserDashboardData(req.user, config.timezone);
+
+      res.json({
+        user: sanitizeUser(req.user),
+        active_shift: dashboard.activeShift,
+        hours: dashboard.hours,
+        schedules: dashboard.schedules,
+        shifts: dashboard.shifts
       });
     })
   );

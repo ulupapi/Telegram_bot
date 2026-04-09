@@ -304,19 +304,15 @@ function renderManager(data) {
 }
 
 async function loadMainData() {
-  const [me, schedules, shifts] = await Promise.all([
-    api('/api/me'),
-    api('/api/my/schedules'),
-    api('/api/my/shifts')
-  ]);
+  const data = await api('/api/my/bootstrap');
 
-  state.user = me.user;
-  state.activeShift = me.active_shift;
-  state.hours = me.hours || {};
+  state.user = data.user;
+  state.activeShift = data.active_shift;
+  state.hours = data.hours || {};
 
   renderMain();
-  renderSchedules(schedules.items || []);
-  renderHistory(shifts.items || []);
+  renderSchedules(data.schedules || []);
+  renderHistory(data.shifts || []);
   renderHours(state.hours || {});
 
   const isManager = state.user.role === 'manager' || state.user.role === 'admin';
@@ -357,17 +353,13 @@ async function handleAddSchedule(event) {
 
   showToast('Расписание сохранено');
   el.scheduleForm.reset();
-
-  const schedules = await api('/api/my/schedules');
-  renderSchedules(schedules.items || []);
+  await loadMainData();
 }
 
 async function handleDeleteSchedule(scheduleId) {
   await api(`/api/my/schedules/${scheduleId}`, { method: 'DELETE' });
   showToast('Запись удалена');
-
-  const schedules = await api('/api/my/schedules');
-  renderSchedules(schedules.items || []);
+  await loadMainData();
 }
 
 async function handleStartShift() {
