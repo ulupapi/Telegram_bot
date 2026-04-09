@@ -3,7 +3,7 @@ meta:
   toolchain:
     name: npm
     version: 20
-build:
-  install: npm install
 run:
-  command: npm start
+  command: npm run start
+  containerPort: 3000
+  persistenceMount: /data
