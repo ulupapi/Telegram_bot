@@ -3,46 +3,25 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Учёт смен</title>
+    <title>Моё расписание</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="app">
       <header class="header">
         <div>
-          <h1>Учёт смен</h1>
+          <h1>Мой график</h1>
           <p id="userLine" class="muted">Загрузка профиля...</p>
         </div>
-        <div id="statusPill" class="status-pill">Не на смене</div>
       </header>
 
       <nav class="tabs" id="tabs">
-        <button class="tab active" data-tab="home">Главная</button>
-        <button class="tab" data-tab="schedule">Моё расписание</button>
+        <button class="tab active" data-tab="schedule">Моё расписание</button>
         <button class="tab" data-tab="history">Моя история</button>
-        <button class="tab" data-tab="hours">Мои часы</button>
-        <button class="tab" data-tab="manager" id="managerTab" hidden>Менеджер</button>
       </nav>
 
       <main>
-        <section class="screen active" id="screen-home">
-          <div class="card">
-            <h2>Текущая смена</h2>
-            <p id="shiftStateText">Статус: не на смене</p>
-            <p class="timer" id="shiftTimer">00:00:00</p>
-            <div class="actions">
-              <button id="startShiftBtn" class="btn btn-primary">Начать смену</button>
-              <button id="endShiftBtn" class="btn btn-danger">Завершить смену</button>
-            </div>
-          </div>
-
-          <div class="card">
-            <h2>Кратко за сегодня</h2>
-            <p id="todaySummary">0 ч 0 мин</p>
-          </div>
-        </section>
-
-        <section class="screen" id="screen-schedule">
+        <section class="screen active" id="screen-schedule">
           <div class="card">
             <h2>Добавить интервал</h2>
             <form id="scheduleForm" class="form-grid">
@@ -72,32 +51,6 @@
           <div class="card">
             <h2>История смен</h2>
             <div id="historyList" class="list"></div>
-          </div>
-        </section>
-
-        <section class="screen" id="screen-hours">
-          <div class="grid-2" id="hoursGrid"></div>
-        </section>
-
-        <section class="screen" id="screen-manager">
-          <div class="card">
-            <h2>Кто сейчас на смене</h2>
-            <div id="managerActiveList" class="list"></div>
-          </div>
-
-          <div class="card">
-            <h2>Сотрудники</h2>
-            <div id="managerUsersList" class="list"></div>
-          </div>
-
-          <div class="card">
-            <h2>Часы сотрудников</h2>
-            <div id="managerHoursList" class="list"></div>
-          </div>
-
-          <div class="card">
-            <h2>Расписание сотрудников</h2>
-            <div id="managerSchedulesList" class="list"></div>
           </div>
         </section>
       </main>

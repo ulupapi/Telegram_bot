@@ -3,34 +3,17 @@ const SESSION_TOKEN_KEY = 'workers_bot_session_token';
 
 const state = {
   token: '',
-  user: null,
-  activeShift: null,
-  hours: null,
-  timerId: null,
-  managerDashboardLoaded: false,
-  shiftRequestInFlight: false
+  user: null
 };
 
 const el = {
   userLine: document.getElementById('userLine'),
-  statusPill: document.getElementById('statusPill'),
-  shiftStateText: document.getElementById('shiftStateText'),
-  shiftTimer: document.getElementById('shiftTimer'),
-  todaySummary: document.getElementById('todaySummary'),
-  startShiftBtn: document.getElementById('startShiftBtn'),
-  endShiftBtn: document.getElementById('endShiftBtn'),
   scheduleForm: document.getElementById('scheduleForm'),
   scheduleDate: document.getElementById('scheduleDate'),
   scheduleStart: document.getElementById('scheduleStart'),
   scheduleEnd: document.getElementById('scheduleEnd'),
   scheduleList: document.getElementById('scheduleList'),
   historyList: document.getElementById('historyList'),
-  hoursGrid: document.getElementById('hoursGrid'),
-  managerTab: document.getElementById('managerTab'),
-  managerActiveList: document.getElementById('managerActiveList'),
-  managerUsersList: document.getElementById('managerUsersList'),
-  managerHoursList: document.getElementById('managerHoursList'),
-  managerSchedulesList: document.getElementById('managerSchedulesList'),
   toast: document.getElementById('toast')
 };
 
@@ -58,14 +41,6 @@ function formatDateTime(iso) {
   });
 }
 
-function formatTimer(seconds) {
-  const total = Math.max(0, Math.floor(seconds));
-  const hh = String(Math.floor(total / 3600)).padStart(2, '0');
-  const mm = String(Math.floor((total % 3600) / 60)).padStart(2, '0');
-  const ss = String(total % 60).padStart(2, '0');
-  return `${hh}:${mm}:${ss}`;
-}
-
 function setTab(tabName) {
   document.querySelectorAll('.tab').forEach((tab) => {
     tab.classList.toggle('active', tab.dataset.tab === tabName);
@@ -74,11 +49,6 @@ function setTab(tabName) {
   document.querySelectorAll('.screen').forEach((screen) => {
     screen.classList.toggle('active', screen.id === `screen-${tabName}`);
   });
-}
-
-function getActiveTabName() {
-  const activeTab = document.querySelector('.tab.active');
-  return activeTab ? activeTab.dataset.tab : 'home';
 }
 
 function getSavedToken() {
@@ -149,7 +119,6 @@ async function loginAndBootstrap() {
   }
 
   const params = new URLSearchParams(window.location.search);
-
   const payload = {
     initData: tg ? tg.initData : ''
   };
@@ -169,51 +138,6 @@ async function loginAndBootstrap() {
   state.token = data.token;
   saveToken(data.token);
   return data;
-}
-
-function renderMain() {
-  const user = state.user;
-  const activeShift = state.activeShift;
-  const onShift = Boolean(activeShift);
-
-  el.userLine.textContent = `${user.full_name} (${user.role})`;
-  el.statusPill.textContent = onShift ? 'На смене' : 'Не на смене';
-  el.statusPill.classList.toggle('active', onShift);
-
-  el.shiftStateText.textContent = onShift
-    ? `Смена начата: ${formatDateTime(activeShift.start_datetime)}`
-    : 'Статус: не на смене';
-
-  el.startShiftBtn.disabled = onShift;
-  el.endShiftBtn.disabled = !onShift;
-
-  const today = state.hours ? state.hours.total_today_minutes : 0;
-  el.todaySummary.textContent = minutesLabel(today);
-
-  startOrStopTimer();
-}
-
-function startOrStopTimer() {
-  if (state.timerId) {
-    clearInterval(state.timerId);
-    state.timerId = null;
-  }
-
-  if (!state.activeShift || !state.activeShift.start_datetime) {
-    el.shiftTimer.textContent = '00:00:00';
-    return;
-  }
-
-  const startedAt = new Date(state.activeShift.start_datetime).getTime();
-
-  const tick = () => {
-    const now = Date.now();
-    const sec = (now - startedAt) / 1000;
-    el.shiftTimer.textContent = formatTimer(sec);
-  };
-
-  tick();
-  state.timerId = setInterval(tick, 1000);
 }
 
 function renderSchedules(items) {
@@ -257,126 +181,17 @@ function renderHistory(items) {
     .join('');
 }
 
-function renderHours(hours) {
-  const cards = [
-    { title: 'Сегодня', key: 'total_today_minutes' },
-    { title: 'Неделя', key: 'total_week_minutes' },
-    { title: 'Месяц', key: 'total_month_minutes' },
-    { title: 'За всё время', key: 'total_all_time_minutes' }
-  ];
-
-  el.hoursGrid.innerHTML = cards
-    .map(
-      (card) => `
-      <div class="card">
-        <div class="small">${card.title}</div>
-        <div class="value">${minutesLabel(hours[card.key] || 0)}</div>
-      </div>
-    `
-    )
-    .join('');
-}
-
-function renderManager(data) {
-  const activeRows = data.activeNow || [];
-  const users = data.users || [];
-  const summaries = data.summaries || [];
-  const schedules = data.schedules || [];
-
-  el.managerActiveList.innerHTML = activeRows.length
-    ? activeRows
-        .map(
-          (item) => `
-            <div class="row">
-              <div class="left">
-                <strong>${item.full_name}</strong>
-                <span class="small">С ${formatDateTime(item.start_datetime)}</span>
-              </div>
-            </div>
-          `
-        )
-        .join('')
-    : '<p class="small">Сейчас никто не на смене.</p>';
-
-  el.managerUsersList.innerHTML = users.length
-    ? users
-        .map(
-          (user) => `
-            <div class="row">
-              <div class="left">
-                <strong>${user.full_name}</strong>
-                <span class="small">Роль: ${user.role}</span>
-              </div>
-            </div>
-          `
-        )
-        .join('')
-    : '<p class="small">Сотрудники не найдены.</p>';
-
-  el.managerHoursList.innerHTML = summaries.length
-    ? summaries
-        .map(
-          (row) => `
-            <div class="row">
-              <div class="left">
-                <strong>${row.full_name}</strong>
-                <span class="small">Сегодня: ${minutesLabel(row.total_today_minutes)}, за всё время: ${minutesLabel(row.total_all_time_minutes)}</span>
-              </div>
-            </div>
-          `
-        )
-        .join('')
-    : '<p class="small">Данные по часам отсутствуют.</p>';
-
-  el.managerSchedulesList.innerHTML = schedules.length
-    ? schedules
-        .map(
-          (row) => `
-            <div class="row">
-              <div class="left">
-                <strong>${row.full_name}</strong>
-                <span class="small">${row.date} ${row.start_time} - ${row.end_time}</span>
-              </div>
-            </div>
-          `
-        )
-        .join('')
-    : '<p class="small">Будущих расписаний нет.</p>';
-}
-
-async function applyBootstrapData(data) {
+function applyBootstrapData(data) {
   state.user = data.user;
-  state.activeShift = data.active_shift;
-  state.hours = data.hours || {};
+  el.userLine.textContent = `${state.user.full_name}`;
 
-  renderMain();
   renderSchedules(data.schedules || []);
   renderHistory(data.shifts || []);
-  renderHours(state.hours || {});
-
-  const isManager = state.user.role === 'manager' || state.user.role === 'admin';
-  el.managerTab.hidden = !isManager;
-  state.managerDashboardLoaded = false;
-
-  if (isManager && getActiveTabName() === 'manager') {
-    await loadManagerData();
-  }
 }
 
 async function loadMainData() {
   const data = await api('/api/my/bootstrap');
-  await applyBootstrapData(data);
-}
-
-async function loadManagerData(forceReload = false) {
-  const isManager = state.user && (state.user.role === 'manager' || state.user.role === 'admin');
-  if (!isManager) return;
-
-  if (!forceReload && state.managerDashboardLoaded) return;
-
-  const dashboard = await api('/api/manager/dashboard');
-  renderManager(dashboard);
-  state.managerDashboardLoaded = true;
+  applyBootstrapData(data);
 }
 
 async function handleAddSchedule(event) {
@@ -406,45 +221,11 @@ async function handleDeleteSchedule(scheduleId) {
   await loadMainData();
 }
 
-async function handleStartShift() {
-  if (state.shiftRequestInFlight) return;
-  state.shiftRequestInFlight = true;
-  el.startShiftBtn.disabled = true;
-  el.endShiftBtn.disabled = true;
-
-  try {
-    await api('/api/my/shifts/start', { method: 'POST' });
-    showToast('Смена начата');
-    await loadMainData();
-  } finally {
-    state.shiftRequestInFlight = false;
-  }
-}
-
-async function handleEndShift() {
-  if (state.shiftRequestInFlight) return;
-  state.shiftRequestInFlight = true;
-  el.startShiftBtn.disabled = true;
-  el.endShiftBtn.disabled = true;
-
-  try {
-    await api('/api/my/shifts/end', { method: 'POST' });
-    showToast('Смена завершена');
-    await loadMainData();
-  } finally {
-    state.shiftRequestInFlight = false;
-  }
-}
-
 function attachEvents() {
   document.getElementById('tabs').addEventListener('click', (event) => {
     const tab = event.target.closest('.tab');
     if (!tab) return;
     setTab(tab.dataset.tab);
-
-    if (tab.dataset.tab === 'manager') {
-      loadManagerData().catch((error) => showToast(error.message));
-    }
   });
 
   el.scheduleForm.addEventListener('submit', async (event) => {
@@ -465,22 +246,6 @@ function attachEvents() {
       showToast(error.message);
     }
   });
-
-  el.startShiftBtn.addEventListener('click', async () => {
-    try {
-      await handleStartShift();
-    } catch (error) {
-      showToast(error.message);
-    }
-  });
-
-  el.endShiftBtn.addEventListener('click', async () => {
-    try {
-      await handleEndShift();
-    } catch (error) {
-      showToast(error.message);
-    }
-  });
 }
 
 async function init() {
@@ -492,7 +257,7 @@ async function init() {
 
     attachEvents();
     const bootstrapData = await loginAndBootstrap();
-    await applyBootstrapData(bootstrapData);
+    applyBootstrapData(bootstrapData);
   } catch (error) {
     console.error(error);
     showToast(error.message || 'Ошибка инициализации');
