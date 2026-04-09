@@ -36,6 +36,33 @@ const SHEETS = {
 };
 
 let sheetsClient = null;
+const READ_CACHE_TTL_MS = 5000;
+const rowsCache = new Map();
+
+function cloneRows(rows) {
+  return rows.map((row) => ({ ...row }));
+}
+
+function getCachedRows(sheetKey) {
+  const cached = rowsCache.get(sheetKey);
+  if (!cached) return null;
+  if (Date.now() > cached.expiresAt) {
+    rowsCache.delete(sheetKey);
+    return null;
+  }
+  return cloneRows(cached.rows);
+}
+
+function setCachedRows(sheetKey, rows) {
+  rowsCache.set(sheetKey, {
+    rows: cloneRows(rows),
+    expiresAt: Date.now() + READ_CACHE_TTL_MS
+  });
+}
+
+function invalidateSheetCache(sheetKey) {
+  rowsCache.delete(sheetKey);
+}
 
 function getGoogleAuthOptions() {
   if (config.serviceAccountKeyFile) {
@@ -147,6 +174,9 @@ async function ensureDefaultSettings() {
 }
 
 async function getRows(sheetKey) {
+  const cached = getCachedRows(sheetKey);
+  if (cached) return cached;
+
   const sheetsApi = await getSheetsClient();
   const sheetName = SHEETS[sheetKey].name;
 
@@ -156,7 +186,9 @@ async function getRows(sheetKey) {
   });
 
   const rows = response.data.values || [];
-  return rows.map((rowValues, index) => toRowObject(sheetKey, rowValues, index + 2));
+  const result = rows.map((rowValues, index) => toRowObject(sheetKey, rowValues, index + 2));
+  setCachedRows(sheetKey, result);
+  return cloneRows(result);
 }
 
 async function appendRow(sheetKey, rowObject) {
@@ -172,6 +204,8 @@ async function appendRow(sheetKey, rowObject) {
       values: [toRowValues(sheetKey, rowObject)]
     }
   });
+
+  invalidateSheetCache(sheetKey);
 }
 
 async function updateRow(sheetKey, rowNumber, rowObject) {
@@ -186,6 +220,8 @@ async function updateRow(sheetKey, rowNumber, rowObject) {
       values: [toRowValues(sheetKey, rowObject)]
     }
   });
+
+  invalidateSheetCache(sheetKey);
 }
 
 async function getSettingsMap() {
@@ -448,18 +484,43 @@ async function recalcAndSaveSummary(user, timezone) {
 }
 
 async function getUserHours(user, timezone) {
-  return recalcAndSaveSummary(user, timezone);
+  const shifts = await listShiftsByUser(user.id);
+  const totals = calculateSummaryMinutes(shifts, timezone);
+
+  return {
+    user_id: user.id,
+    full_name: user.full_name,
+    ...totals,
+    updated_at: nowIso()
+  };
 }
 
 async function getManagerDashboard(timezone) {
-  const users = await listActiveUsers();
+  const [users, schedules, allShifts] = await Promise.all([
+    listActiveUsers(),
+    listAllUpcomingSchedules(),
+    getRows('shifts')
+  ]);
+
   const userMap = new Map(users.map((user) => [user.id, user]));
 
-  const [activeShifts, schedules, summaries] = await Promise.all([
-    listActiveShifts(),
-    listAllUpcomingSchedules(),
-    Promise.all(users.map((user) => recalcAndSaveSummary(user, timezone)))
-  ]);
+  const activeShifts = allShifts.filter((shift) => shift.status === 'active');
+  const completedByUser = new Map();
+
+  for (const shift of allShifts) {
+    if (shift.status !== 'completed') continue;
+    if (!completedByUser.has(shift.user_id)) {
+      completedByUser.set(shift.user_id, []);
+    }
+    completedByUser.get(shift.user_id).push(shift);
+  }
+
+  const summaries = users.map((user) => ({
+    user_id: user.id,
+    full_name: user.full_name,
+    ...calculateSummaryMinutes(completedByUser.get(user.id) || [], timezone),
+    updated_at: nowIso()
+  }));
 
   const activeNow = activeShifts.map((shift) => ({
     ...shift,

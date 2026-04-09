@@ -5,7 +5,9 @@ const state = {
   user: null,
   activeShift: null,
   hours: null,
-  timerId: null
+  timerId: null,
+  managerDashboardLoaded: false,
+  shiftRequestInFlight: false
 };
 
 const el = {
@@ -71,6 +73,11 @@ function setTab(tabName) {
   document.querySelectorAll('.screen').forEach((screen) => {
     screen.classList.toggle('active', screen.id === `screen-${tabName}`);
   });
+}
+
+function getActiveTabName() {
+  const activeTab = document.querySelector('.tab.active');
+  return activeTab ? activeTab.dataset.tab : 'home';
 }
 
 async function api(path, options = {}) {
@@ -297,29 +304,39 @@ function renderManager(data) {
 }
 
 async function loadMainData() {
-  const [me, schedules, shifts, hours] = await Promise.all([
+  const [me, schedules, shifts] = await Promise.all([
     api('/api/me'),
     api('/api/my/schedules'),
-    api('/api/my/shifts'),
-    api('/api/my/hours')
+    api('/api/my/shifts')
   ]);
 
   state.user = me.user;
   state.activeShift = me.active_shift;
-  state.hours = hours.hours;
+  state.hours = me.hours || {};
 
   renderMain();
   renderSchedules(schedules.items || []);
   renderHistory(shifts.items || []);
-  renderHours(hours.hours || {});
+  renderHours(state.hours || {});
 
   const isManager = state.user.role === 'manager' || state.user.role === 'admin';
   el.managerTab.hidden = !isManager;
+  state.managerDashboardLoaded = false;
 
-  if (isManager) {
-    const dashboard = await api('/api/manager/dashboard');
-    renderManager(dashboard);
+  if (isManager && getActiveTabName() === 'manager') {
+    await loadManagerData();
   }
+}
+
+async function loadManagerData(forceReload = false) {
+  const isManager = state.user && (state.user.role === 'manager' || state.user.role === 'admin');
+  if (!isManager) return;
+
+  if (!forceReload && state.managerDashboardLoaded) return;
+
+  const dashboard = await api('/api/manager/dashboard');
+  renderManager(dashboard);
+  state.managerDashboardLoaded = true;
 }
 
 async function handleAddSchedule(event) {
@@ -354,15 +371,33 @@ async function handleDeleteSchedule(scheduleId) {
 }
 
 async function handleStartShift() {
-  await api('/api/my/shifts/start', { method: 'POST' });
-  showToast('Смена начата');
-  await loadMainData();
+  if (state.shiftRequestInFlight) return;
+  state.shiftRequestInFlight = true;
+  el.startShiftBtn.disabled = true;
+  el.endShiftBtn.disabled = true;
+
+  try {
+    await api('/api/my/shifts/start', { method: 'POST' });
+    showToast('Смена начата');
+    await loadMainData();
+  } finally {
+    state.shiftRequestInFlight = false;
+  }
 }
 
 async function handleEndShift() {
-  await api('/api/my/shifts/end', { method: 'POST' });
-  showToast('Смена завершена');
-  await loadMainData();
+  if (state.shiftRequestInFlight) return;
+  state.shiftRequestInFlight = true;
+  el.startShiftBtn.disabled = true;
+  el.endShiftBtn.disabled = true;
+
+  try {
+    await api('/api/my/shifts/end', { method: 'POST' });
+    showToast('Смена завершена');
+    await loadMainData();
+  } finally {
+    state.shiftRequestInFlight = false;
+  }
 }
 
 function attachEvents() {
@@ -370,6 +405,10 @@ function attachEvents() {
     const tab = event.target.closest('.tab');
     if (!tab) return;
     setTab(tab.dataset.tab);
+
+    if (tab.dataset.tab === 'manager') {
+      loadManagerData().catch((error) => showToast(error.message));
+    }
   });
 
   el.scheduleForm.addEventListener('submit', async (event) => {

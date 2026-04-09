@@ -4,6 +4,5 @@ meta:
     name: npm
     version: 20
 run:
-  command: npm run start
+  command: npm start
   containerPort: 3000
-  persistenceMount: /data

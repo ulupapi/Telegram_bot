@@ -118,6 +118,11 @@ function createServer() {
     '/api/my/shifts/end',
     authMiddleware,
     asyncHandler(async (req, res) => {
+      const activeShift = await getActiveShiftByUser(req.user.id);
+      if (!activeShift) {
+        return res.status(409).json({ error: 'Активная смена уже завершена или не найдена' });
+      }
+
       const shift = await endShift(req.user.id);
       res.json({ shift });
     })
