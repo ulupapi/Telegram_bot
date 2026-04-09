@@ -1,4 +1,5 @@
 const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+const SESSION_TOKEN_KEY = 'workers_bot_session_token';
 
 const state = {
   token: '',
@@ -80,6 +81,30 @@ function getActiveTabName() {
   return activeTab ? activeTab.dataset.tab : 'home';
 }
 
+function getSavedToken() {
+  try {
+    return localStorage.getItem(SESSION_TOKEN_KEY) || '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function saveToken(token) {
+  try {
+    localStorage.setItem(SESSION_TOKEN_KEY, token);
+  } catch (error) {
+    // ignore
+  }
+}
+
+function clearSavedToken() {
+  try {
+    localStorage.removeItem(SESSION_TOKEN_KEY);
+  } catch (error) {
+    // ignore
+  }
+}
+
 async function api(path, options = {}) {
   const method = options.method || 'GET';
   const body = options.body || null;
@@ -101,13 +126,28 @@ async function api(path, options = {}) {
 
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401) {
+      state.token = '';
+      clearSavedToken();
+    }
     throw new Error(data.error || 'Ошибка запроса');
   }
 
   return data;
 }
 
-async function login() {
+async function loginAndBootstrap() {
+  const cachedToken = getSavedToken();
+  if (cachedToken) {
+    state.token = cachedToken;
+    try {
+      return await api('/api/my/bootstrap');
+    } catch (error) {
+      state.token = '';
+      clearSavedToken();
+    }
+  }
+
   const params = new URLSearchParams(window.location.search);
 
   const payload = {
@@ -127,7 +167,8 @@ async function login() {
   });
 
   state.token = data.token;
-  state.user = data.user;
+  saveToken(data.token);
+  return data;
 }
 
 function renderMain() {
@@ -303,9 +344,7 @@ function renderManager(data) {
     : '<p class="small">Будущих расписаний нет.</p>';
 }
 
-async function loadMainData() {
-  const data = await api('/api/my/bootstrap');
-
+async function applyBootstrapData(data) {
   state.user = data.user;
   state.activeShift = data.active_shift;
   state.hours = data.hours || {};
@@ -322,6 +361,11 @@ async function loadMainData() {
   if (isManager && getActiveTabName() === 'manager') {
     await loadManagerData();
   }
+}
+
+async function loadMainData() {
+  const data = await api('/api/my/bootstrap');
+  await applyBootstrapData(data);
 }
 
 async function loadManagerData(forceReload = false) {
@@ -447,8 +491,8 @@ async function init() {
     }
 
     attachEvents();
-    await login();
-    await loadMainData();
+    const bootstrapData = await loginAndBootstrap();
+    await applyBootstrapData(bootstrapData);
   } catch (error) {
     console.error(error);
     showToast(error.message || 'Ошибка инициализации');

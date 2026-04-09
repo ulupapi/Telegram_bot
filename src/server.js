@@ -57,7 +57,16 @@ function createServer() {
     asyncHandler(async (req, res) => {
       const payload = req.body || {};
       const session = await signInTelegram(payload);
-      res.json(session);
+      const dashboard = await getUserDashboardData(session.user, config.timezone);
+
+      res.json({
+        token: session.token,
+        user: session.user,
+        active_shift: dashboard.activeShift,
+        hours: dashboard.hours,
+        schedules: dashboard.schedules,
+        shifts: dashboard.shifts
+      });
     })
   );
 
