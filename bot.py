@@ -17,8 +17,8 @@ from handlers import build_router
 @dataclass(frozen=True)
 class Settings:
     telegram_bot_token: str
-    target_chat_id: int
-    target_topic_id: int
+    target_chat_id: int | None
+    target_topic_id: int | None
     llm_provider: str
     llm_model: str
     gemini_api_key: str | None
@@ -31,8 +31,8 @@ def load_settings() -> Settings:
     load_dotenv()
 
     telegram_bot_token = require_env("TELEGRAM_BOT_TOKEN")
-    target_chat_id = int(require_env("TARGET_CHAT_ID"))
-    target_topic_id = int(require_env("TARGET_TOPIC_ID"))
+    target_chat_id = parse_optional_int("TARGET_CHAT_ID")
+    target_topic_id = parse_optional_int("TARGET_TOPIC_ID")
     llm_provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
 
     if llm_provider == "openai":
@@ -58,6 +58,13 @@ def require_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"Missing environment variable: {name}")
     return value
+
+
+def parse_optional_int(name: str) -> int | None:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    return int(raw.strip())
 
 
 async def main() -> None:
@@ -90,7 +97,11 @@ async def main() -> None:
     )
 
     await bot.set_my_commands(
-        [BotCommand(command="status", description="Сводка: сделано / в работе / зависло")]
+        [
+            BotCommand(command="status", description="Сводка: сделано / в работе / зависло"),
+            BotCommand(command="bind", description="Привязать имя к текущему чату/ветке"),
+            BotCommand(command="where", description="Показать текущий chat_id/topic_id"),
+        ]
     )
 
     try:

@@ -66,6 +66,17 @@ class Database:
                 )
                 """
             )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS scope_aliases (
+                    alias TEXT PRIMARY KEY,
+                    chat_id INTEGER NOT NULL,
+                    thread_id INTEGER NOT NULL,
+                    is_manual INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
 
     def save_message(
         self,
@@ -131,6 +142,66 @@ class Database:
                     """,
                     (task.external_id, task.title, task.assignee, task.status),
                 )
+
+    def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None:
+        clean_alias = alias.strip().lower()
+        if not clean_alias:
+            return
+
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO scope_aliases (alias, chat_id, thread_id, is_manual)
+                VALUES (?, ?, ?, 0)
+                ON CONFLICT(alias) DO UPDATE SET
+                    chat_id = CASE
+                        WHEN scope_aliases.is_manual = 1 THEN scope_aliases.chat_id
+                        ELSE excluded.chat_id
+                    END,
+                    thread_id = CASE
+                        WHEN scope_aliases.is_manual = 1 THEN scope_aliases.thread_id
+                        ELSE excluded.thread_id
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (clean_alias, chat_id, thread_id),
+            )
+
+    def set_manual_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None:
+        clean_alias = alias.strip().lower()
+        if not clean_alias:
+            return
+
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO scope_aliases (alias, chat_id, thread_id, is_manual)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(alias) DO UPDATE SET
+                    chat_id = excluded.chat_id,
+                    thread_id = excluded.thread_id,
+                    is_manual = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (clean_alias, chat_id, thread_id),
+            )
+
+    def resolve_scope_alias(self, *, alias: str) -> tuple[int, int] | None:
+        clean_alias = alias.strip().lower()
+        if not clean_alias:
+            return None
+
+        row = self.conn.execute(
+            """
+            SELECT chat_id, thread_id
+            FROM scope_aliases
+            WHERE alias = ?
+            """,
+            (clean_alias,),
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row["chat_id"]), int(row["thread_id"])
 
     def close(self) -> None:
         self.conn.close()
