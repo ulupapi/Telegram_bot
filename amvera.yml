@@ -1,8 +1,9 @@
 meta:
-  environment: node
+  environment: python
   toolchain:
-    name: npm
-    version: 20
+    name: pip
+    version: 3.11
+build:
+  requirementsPath: requirements.txt
 run:
-  command: npm start
-  containerPort: 3000
+  scriptName: bot.py
