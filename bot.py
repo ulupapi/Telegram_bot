@@ -47,14 +47,14 @@ def load_settings() -> Settings:
     if llm_provider == "openai":
         llm_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
         openai_api_key = os.getenv("OPENAI_API_KEY")
-        openai_base_url = os.getenv("OPENAI_BASE_URL")
+        openai_base_url = parse_optional_str("OPENAI_BASE_URL")
     elif llm_provider == "amvera":
-        llm_model = os.getenv("AMVERA_LLM_MODEL", "gpt-4.1-mini")
-        amvera_api_key = os.getenv("AMVERA_LLM_API_KEY")
-        amvera_base_url = os.getenv("AMVERA_LLM_BASE_URL")
+        llm_model = os.getenv("AMVERA_LLM_MODEL", "gpt-4.1-mini").strip()
+        amvera_api_key = parse_optional_str("AMVERA_LLM_API_KEY")
+        amvera_base_url = parse_optional_str("AMVERA_LLM_BASE_URL")
     else:
-        llm_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-        gemini_api_key = os.getenv("GEMINI_API_KEY")
+        llm_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
+        gemini_api_key = parse_optional_str("GEMINI_API_KEY")
 
     return Settings(
         telegram_bot_token=telegram_bot_token,
@@ -84,6 +84,14 @@ def parse_optional_int(name: str) -> int | None:
     if raw is None or not raw.strip():
         return None
     return int(raw.strip())
+
+
+def parse_optional_str(name: str) -> str | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    return value or None
 
 
 async def main() -> None:

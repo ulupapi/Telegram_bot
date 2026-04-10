@@ -58,7 +58,12 @@ class AIExtractor:
             if not amvera_base_url:
                 raise RuntimeError("AMVERA_LLM_BASE_URL is required when LLM_PROVIDER=amvera")
             self._amvera_api_key = amvera_api_key
-            self._amvera_base_url = amvera_base_url.rstrip("/")
+            base_url = amvera_base_url.strip()
+            if not base_url:
+                raise RuntimeError("AMVERA_LLM_BASE_URL is empty")
+            if not base_url.startswith(("http://", "https://")):
+                base_url = f"https://{base_url}"
+            self._amvera_base_url = base_url.rstrip("/")
         else:
             raise RuntimeError("LLM_PROVIDER must be one of: gemini, openai, amvera")
 
@@ -168,6 +173,10 @@ class AIExtractor:
     def _ask_amvera(self, prompt: str) -> str:
         base_url = self._amvera_base_url
         model = self.model.strip()
+        if not base_url.startswith(("http://", "https://")):
+            raise RuntimeError(
+                "AMVERA_LLM_BASE_URL must start with http:// or https://"
+            )
         endpoint = self._amvera_endpoint_for_model(model)
         url = f"{base_url}/models/{endpoint}"
 
