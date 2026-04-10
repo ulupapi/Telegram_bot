@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from typing import Iterable
 
+import httpx
+
 from database import StoredMessage, TaskRecord
 
 
@@ -25,11 +27,15 @@ class AIExtractor:
         gemini_api_key: str | None = None,
         openai_api_key: str | None = None,
         openai_base_url: str | None = None,
+        amvera_api_key: str | None = None,
+        amvera_base_url: str | None = None,
     ) -> None:
         self.provider = provider.strip().lower()
         self.model = model
         self._gemini_client = None
         self._openai_client = None
+        self._amvera_api_key = None
+        self._amvera_base_url = None
 
         if self.provider == "gemini":
             if not gemini_api_key:
@@ -37,21 +43,22 @@ class AIExtractor:
             from google import genai
 
             self._gemini_client = genai.Client(api_key=gemini_api_key)
-        elif self.provider in {"openai", "amvera"}:
+        elif self.provider == "openai":
             if not openai_api_key:
-                if self.provider == "amvera":
-                    raise RuntimeError("AMVERA_LLM_API_KEY is required when LLM_PROVIDER=amvera")
                 raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
             from openai import OpenAI
 
-            if self.provider == "amvera" and not openai_base_url:
-                raise RuntimeError(
-                    "AMVERA_LLM_BASE_URL is required when LLM_PROVIDER=amvera"
-                )
             self._openai_client = OpenAI(
                 api_key=openai_api_key,
                 base_url=openai_base_url or None,
             )
+        elif self.provider == "amvera":
+            if not amvera_api_key:
+                raise RuntimeError("AMVERA_LLM_API_KEY is required when LLM_PROVIDER=amvera")
+            if not amvera_base_url:
+                raise RuntimeError("AMVERA_LLM_BASE_URL is required when LLM_PROVIDER=amvera")
+            self._amvera_api_key = amvera_api_key
+            self._amvera_base_url = amvera_base_url.rstrip("/")
         else:
             raise RuntimeError("LLM_PROVIDER must be one of: gemini, openai, amvera")
 
@@ -132,6 +139,8 @@ class AIExtractor:
                 contents=prompt,
             )
             return getattr(response, "text", "") or ""
+        if self.provider == "amvera":
+            return self._ask_amvera(prompt)
 
         messages = [
             {
@@ -155,6 +164,71 @@ class AIExtractor:
             )
         content = response.choices[0].message.content
         return content or ""
+
+    def _ask_amvera(self, prompt: str) -> str:
+        base_url = self._amvera_base_url
+        model = self.model.strip()
+        endpoint = self._amvera_endpoint_for_model(model)
+        url = f"{base_url}/models/{endpoint}"
+
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "text": "Return only JSON object without markdown."},
+                {"role": "user", "text": prompt},
+            ],
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Auth-Token": f"Bearer {self._amvera_api_key}",
+        }
+
+        with httpx.Client(timeout=45.0) as client:
+            response = client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+        # GPT-like models often return OpenAI-style payload.
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message", {})
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content
+
+        # Llama-like payload shape in Amvera examples.
+        result = data.get("result")
+        if isinstance(result, dict):
+            alternatives = result.get("alternatives")
+            if isinstance(alternatives, list) and alternatives:
+                alt_message = alternatives[0].get("message", {})
+                if isinstance(alt_message, dict):
+                    text = alt_message.get("text")
+                    if isinstance(text, str) and text.strip():
+                        return text
+
+        # Fallbacks for provider-specific variants.
+        if isinstance(data.get("text"), str):
+            return data["text"]
+        if isinstance(data.get("content"), str):
+            return data["content"]
+
+        # Keep parser behavior consistent: best-effort JSON string.
+        return json.dumps(data, ensure_ascii=False)
+
+    def _amvera_endpoint_for_model(self, model: str) -> str:
+        low = model.lower()
+        if low.startswith("gpt"):
+            return "gpt"
+        if low.startswith("llama"):
+            return "llama"
+        if low.startswith("deepseek"):
+            return "deepseek"
+        if low.startswith("qwen"):
+            return "qwen"
+        return "gpt"
 
     def _parse_json(self, raw: str) -> dict:
         text = (raw or "").strip()

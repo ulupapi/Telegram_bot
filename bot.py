@@ -24,6 +24,8 @@ class Settings:
     gemini_api_key: str | None
     openai_api_key: str | None
     openai_base_url: str | None
+    amvera_api_key: str | None
+    amvera_base_url: str | None
     sqlite_path: str
     context_messages_limit: int
 
@@ -39,6 +41,8 @@ def load_settings() -> Settings:
     gemini_api_key: str | None = None
     openai_api_key: str | None = None
     openai_base_url: str | None = None
+    amvera_api_key: str | None = None
+    amvera_base_url: str | None = None
 
     if llm_provider == "openai":
         llm_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
@@ -46,8 +50,8 @@ def load_settings() -> Settings:
         openai_base_url = os.getenv("OPENAI_BASE_URL")
     elif llm_provider == "amvera":
         llm_model = os.getenv("AMVERA_LLM_MODEL", "gpt-4.1-mini")
-        openai_api_key = os.getenv("AMVERA_LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
-        openai_base_url = os.getenv("AMVERA_LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+        amvera_api_key = os.getenv("AMVERA_LLM_API_KEY")
+        amvera_base_url = os.getenv("AMVERA_LLM_BASE_URL")
     else:
         llm_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
         gemini_api_key = os.getenv("GEMINI_API_KEY")
@@ -61,6 +65,8 @@ def load_settings() -> Settings:
         gemini_api_key=gemini_api_key,
         openai_api_key=openai_api_key,
         openai_base_url=openai_base_url,
+        amvera_api_key=amvera_api_key,
+        amvera_base_url=amvera_base_url,
         sqlite_path=os.getenv("SQLITE_PATH", "data/bot.db"),
         context_messages_limit=int(os.getenv("CONTEXT_MESSAGES_LIMIT", "120")),
     )
@@ -96,6 +102,8 @@ async def main() -> None:
         gemini_api_key=settings.gemini_api_key,
         openai_api_key=settings.openai_api_key,
         openai_base_url=settings.openai_base_url,
+        amvera_api_key=settings.amvera_api_key,
+        amvera_base_url=settings.amvera_base_url,
     )
 
     bot = Bot(token=settings.telegram_bot_token)

@@ -22,7 +22,7 @@
 
 - `LLM_PROVIDER=gemini`
 - `LLM_PROVIDER=openai`
-- `LLM_PROVIDER=amvera` (через OpenAI-compatible endpoint)
+- `LLM_PROVIDER=amvera` (нативный API Amvera LLM)
 
 Для `amvera` задайте:
 
