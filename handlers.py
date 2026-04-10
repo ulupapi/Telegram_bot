@@ -248,4 +248,9 @@ def _humanize_llm_error(exc: Exception) -> str:
         )
     if "429" in text:
         return "Слишком много запросов к LLM (429). Подождите немного и повторите."
+    if "502" in text or "bad gateway" in text:
+        return (
+            "LLM-шлюз временно недоступен (502). "
+            "Попробуйте еще раз через 20-30 секунд."
+        )
     return "Не удалось получить сводку от LLM. Попробуйте чуть позже."

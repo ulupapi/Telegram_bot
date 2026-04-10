@@ -57,7 +57,10 @@ class AIExtractor:
                 raise RuntimeError("AMVERA_LLM_API_KEY is required when LLM_PROVIDER=amvera")
             if not amvera_base_url:
                 raise RuntimeError("AMVERA_LLM_BASE_URL is required when LLM_PROVIDER=amvera")
-            self._amvera_api_key = amvera_api_key
+            token = amvera_api_key.strip()
+            if token.lower().startswith("bearer "):
+                token = token[7:].strip()
+            self._amvera_api_key = token
             base_url = amvera_base_url.strip()
             if not base_url:
                 raise RuntimeError("AMVERA_LLM_BASE_URL is empty")
@@ -183,8 +186,12 @@ class AIExtractor:
         payload = {
             "model": model,
             "messages": [
-                {"role": "system", "text": "Return only JSON object without markdown."},
-                {"role": "user", "text": prompt},
+                {
+                    "role": "system",
+                    "text": "Return only JSON object without markdown.",
+                    "content": "Return only JSON object without markdown.",
+                },
+                {"role": "user", "text": prompt, "content": prompt},
             ],
         }
         headers = {
@@ -194,9 +201,29 @@ class AIExtractor:
         }
 
         with httpx.Client(timeout=45.0) as client:
-            response = client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+            try:
+                response = client.post(url, json=payload, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+            except httpx.HTTPStatusError as exc:
+                # Some accounts/models intermittently return 5xx on /models/gpt.
+                # Fallback to llama8b keeps /status usable for operational checks.
+                status = exc.response.status_code
+                if status >= 500 and endpoint == "gpt":
+                    fallback_url = f"{base_url}/models/llama"
+                    fallback_payload = {
+                        "model": "llama8b",
+                        "messages": payload["messages"],
+                    }
+                    response = client.post(
+                        fallback_url,
+                        json=fallback_payload,
+                        headers=headers,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                else:
+                    raise
 
         # GPT-like models often return OpenAI-style payload.
         choices = data.get("choices")
