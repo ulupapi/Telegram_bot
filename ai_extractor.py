@@ -24,6 +24,7 @@ class AIExtractor:
         model: str,
         gemini_api_key: str | None = None,
         openai_api_key: str | None = None,
+        openai_base_url: str | None = None,
     ) -> None:
         self.provider = provider.strip().lower()
         self.model = model
@@ -36,14 +37,23 @@ class AIExtractor:
             from google import genai
 
             self._gemini_client = genai.Client(api_key=gemini_api_key)
-        elif self.provider == "openai":
+        elif self.provider in {"openai", "amvera"}:
             if not openai_api_key:
+                if self.provider == "amvera":
+                    raise RuntimeError("AMVERA_LLM_API_KEY is required when LLM_PROVIDER=amvera")
                 raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
             from openai import OpenAI
 
-            self._openai_client = OpenAI(api_key=openai_api_key)
+            if self.provider == "amvera" and not openai_base_url:
+                raise RuntimeError(
+                    "AMVERA_LLM_BASE_URL is required when LLM_PROVIDER=amvera"
+                )
+            self._openai_client = OpenAI(
+                api_key=openai_api_key,
+                base_url=openai_base_url or None,
+            )
         else:
-            raise RuntimeError("LLM_PROVIDER must be either 'gemini' or 'openai'")
+            raise RuntimeError("LLM_PROVIDER must be one of: gemini, openai, amvera")
 
     def extract_status(self, messages: Iterable[StoredMessage]) -> StatusReport:
         messages_list = list(messages)

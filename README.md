@@ -16,6 +16,20 @@
 - `/status Название` для получения сводки по сохраненному имени;
 - `/where` для проверки текущего `chat_id/topic_id`.
 
+### Провайдеры LLM
+
+Поддерживаются три варианта:
+
+- `LLM_PROVIDER=gemini`
+- `LLM_PROVIDER=openai`
+- `LLM_PROVIDER=amvera` (через OpenAI-compatible endpoint)
+
+Для `amvera` задайте:
+
+- `AMVERA_LLM_API_KEY`
+- `AMVERA_LLM_BASE_URL` (endpoint вида `.../v1`)
+- `AMVERA_LLM_MODEL`
+
 ## Локальный запуск
 
 1. Создайте виртуальное окружение и установите зависимости:

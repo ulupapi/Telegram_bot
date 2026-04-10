@@ -23,6 +23,7 @@ class Settings:
     llm_model: str
     gemini_api_key: str | None
     openai_api_key: str | None
+    openai_base_url: str | None
     sqlite_path: str
     context_messages_limit: int
 
@@ -35,10 +36,21 @@ def load_settings() -> Settings:
     target_topic_id = parse_optional_int("TARGET_TOPIC_ID")
     llm_provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
 
+    gemini_api_key: str | None = None
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+
     if llm_provider == "openai":
         llm_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        openai_base_url = os.getenv("OPENAI_BASE_URL")
+    elif llm_provider == "amvera":
+        llm_model = os.getenv("AMVERA_LLM_MODEL", "gpt-4.1-mini")
+        openai_api_key = os.getenv("AMVERA_LLM_API_KEY") or os.getenv("OPENAI_API_KEY")
+        openai_base_url = os.getenv("AMVERA_LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL")
     else:
         llm_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        gemini_api_key = os.getenv("GEMINI_API_KEY")
 
     return Settings(
         telegram_bot_token=telegram_bot_token,
@@ -46,8 +58,9 @@ def load_settings() -> Settings:
         target_topic_id=target_topic_id,
         llm_provider=llm_provider,
         llm_model=llm_model,
-        gemini_api_key=os.getenv("GEMINI_API_KEY"),
-        openai_api_key=os.getenv("OPENAI_API_KEY"),
+        gemini_api_key=gemini_api_key,
+        openai_api_key=openai_api_key,
+        openai_base_url=openai_base_url,
         sqlite_path=os.getenv("SQLITE_PATH", "data/bot.db"),
         context_messages_limit=int(os.getenv("CONTEXT_MESSAGES_LIMIT", "120")),
     )
@@ -82,6 +95,7 @@ async def main() -> None:
         model=settings.llm_model,
         gemini_api_key=settings.gemini_api_key,
         openai_api_key=settings.openai_api_key,
+        openai_base_url=settings.openai_base_url,
     )
 
     bot = Bot(token=settings.telegram_bot_token)
