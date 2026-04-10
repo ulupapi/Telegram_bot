@@ -49,7 +49,7 @@ def load_settings() -> Settings:
         openai_api_key = os.getenv("OPENAI_API_KEY")
         openai_base_url = parse_optional_str("OPENAI_BASE_URL")
     elif llm_provider == "amvera":
-        llm_model = os.getenv("AMVERA_LLM_MODEL", "gpt-4.1-mini").strip()
+        llm_model = os.getenv("AMVERA_LLM_MODEL", "llama8b").strip()
         amvera_api_key = parse_optional_str("AMVERA_LLM_API_KEY")
         amvera_base_url = parse_optional_str("AMVERA_LLM_BASE_URL")
     else:

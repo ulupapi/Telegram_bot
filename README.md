@@ -28,7 +28,7 @@
 
 - `AMVERA_LLM_API_KEY`
 - `AMVERA_LLM_BASE_URL` (endpoint вида `.../v1`)
-- `AMVERA_LLM_MODEL`
+- `AMVERA_LLM_MODEL` (рекомендуется `llama8b` для стабильного старта)
 
 ## Локальный запуск
 

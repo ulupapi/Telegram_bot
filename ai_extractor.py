@@ -116,6 +116,10 @@ class AIExtractor:
         for msg in messages:
             lines.append(f"[{msg.created_at}] {msg.user_name}: {msg.text}")
         dialog = "\n".join(lines)
+        # Defensive cap to reduce provider-side 400 errors on very large payloads.
+        max_dialog_chars = 12000
+        if len(dialog) > max_dialog_chars:
+            dialog = dialog[-max_dialog_chars:]
 
         return (
             "Ты аналитик задач команды. На входе обсуждение из одной Telegram-ветки.\n"
@@ -186,12 +190,8 @@ class AIExtractor:
         payload = {
             "model": model,
             "messages": [
-                {
-                    "role": "system",
-                    "text": "Return only JSON object without markdown.",
-                    "content": "Return only JSON object without markdown.",
-                },
-                {"role": "user", "text": prompt, "content": prompt},
+                {"role": "system", "text": "Return only JSON object without markdown."},
+                {"role": "user", "text": prompt},
             ],
         }
         headers = {
@@ -200,30 +200,46 @@ class AIExtractor:
             "X-Auth-Token": f"Bearer {self._amvera_api_key}",
         }
 
+        attempts = [(endpoint, model)]
+        if endpoint == "gpt":
+            if model != "gpt-4.1":
+                attempts.append(("gpt", "gpt-4.1"))
+            attempts.append(("llama", "llama8b"))
+        elif endpoint == "llama" and model != "llama8b":
+            attempts.append(("llama", "llama8b"))
+
         with httpx.Client(timeout=45.0) as client:
-            try:
-                response = client.post(url, json=payload, headers=headers)
-                response.raise_for_status()
-                data = response.json()
-            except httpx.HTTPStatusError as exc:
-                # Some accounts/models intermittently return 5xx on /models/gpt.
-                # Fallback to llama8b keeps /status usable for operational checks.
-                status = exc.response.status_code
-                if status >= 500 and endpoint == "gpt":
-                    fallback_url = f"{base_url}/models/llama"
-                    fallback_payload = {
-                        "model": "llama8b",
-                        "messages": payload["messages"],
-                    }
+            data = None
+            last_exc: Exception | None = None
+            for attempt_endpoint, attempt_model in attempts:
+                attempt_url = f"{base_url}/models/{attempt_endpoint}"
+                attempt_payload = {
+                    "model": attempt_model,
+                    "messages": payload["messages"],
+                }
+                try:
                     response = client.post(
-                        fallback_url,
-                        json=fallback_payload,
+                        attempt_url,
+                        json=attempt_payload,
                         headers=headers,
                     )
                     response.raise_for_status()
                     data = response.json()
-                else:
-                    raise
+                    break
+                except httpx.HTTPStatusError as exc:
+                    last_exc = exc
+                    status = exc.response.status_code
+                    if status in {401, 403}:
+                        raise
+                    continue
+                except Exception as exc:
+                    last_exc = exc
+                    continue
+
+            if data is None:
+                if last_exc:
+                    raise last_exc
+                raise RuntimeError("Amvera request failed without response")
 
         # GPT-like models often return OpenAI-style payload.
         choices = data.get("choices")
