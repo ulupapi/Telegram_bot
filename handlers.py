@@ -100,9 +100,9 @@ def build_router(
         try:
             report = await asyncio.to_thread(extractor.extract_status, rows)
             await asyncio.to_thread(db.replace_tasks, report.tasks)
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to build status report")
-            await message.answer("Не удалось получить сводку от LLM. Попробуйте чуть позже.")
+            await message.answer(_humanize_llm_error(exc))
             return
 
         await message.answer(_render_status(report))
@@ -233,3 +233,19 @@ def _extract_topic_name(message: Message) -> str:
     if message.reply_to_message and message.reply_to_message.forum_topic_created:
         return message.reply_to_message.forum_topic_created.name
     return ""
+
+
+def _humanize_llm_error(exc: Exception) -> str:
+    text = str(exc).lower()
+    if (
+        "insufficient_quota" in text
+        or "resource_exhausted" in text
+        or "quota exceeded" in text
+    ):
+        return (
+            "Лимит LLM API исчерпан (quota). "
+            "Пополните/включите billing и попробуйте снова."
+        )
+    if "429" in text:
+        return "Слишком много запросов к LLM (429). Подождите немного и повторите."
+    return "Не удалось получить сводку от LLM. Попробуйте чуть позже."
