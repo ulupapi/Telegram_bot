@@ -242,6 +242,11 @@ class AIExtractor:
                             "Amvera auth error: "
                             f"status={status}, body={body}"
                         ) from exc
+                    if status == 402:
+                        raise RuntimeError(
+                            "Amvera payment required: "
+                            f"status=402, endpoint={attempt_endpoint}, model={attempt_model}, body={body}"
+                        ) from exc
                     continue
                 except Exception as exc:
                     last_exc = exc
