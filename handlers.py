@@ -253,4 +253,9 @@ def _humanize_llm_error(exc: Exception) -> str:
             "LLM-шлюз временно недоступен (502). "
             "Попробуйте еще раз через 20-30 секунд."
         )
+    if "amvera request failed" in text and "400" in text:
+        return (
+            "Amvera вернул 400 Bad Request. "
+            "Проверьте AMVERA_LLM_MODEL и API-ключ (теперь детали есть в логах)."
+        )
     return "Не удалось получить сводку от LLM. Попробуйте чуть позже."

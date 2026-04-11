@@ -117,7 +117,7 @@ class AIExtractor:
             lines.append(f"[{msg.created_at}] {msg.user_name}: {msg.text}")
         dialog = "\n".join(lines)
         # Defensive cap to reduce provider-side 400 errors on very large payloads.
-        max_dialog_chars = 12000
+        max_dialog_chars = 4000
         if len(dialog) > max_dialog_chars:
             dialog = dialog[-max_dialog_chars:]
 
@@ -211,6 +211,7 @@ class AIExtractor:
         with httpx.Client(timeout=45.0) as client:
             data = None
             last_exc: Exception | None = None
+            last_details: str | None = None
             for attempt_endpoint, attempt_model in attempts:
                 attempt_url = f"{base_url}/models/{attempt_endpoint}"
                 attempt_payload = {
@@ -229,14 +230,27 @@ class AIExtractor:
                 except httpx.HTTPStatusError as exc:
                     last_exc = exc
                     status = exc.response.status_code
+                    body = (exc.response.text or "").strip()
+                    if len(body) > 500:
+                        body = body[:500]
+                    last_details = (
+                        f"status={status}, endpoint={attempt_endpoint}, model={attempt_model}, "
+                        f"body={body}"
+                    )
                     if status in {401, 403}:
-                        raise
+                        raise RuntimeError(
+                            "Amvera auth error: "
+                            f"status={status}, body={body}"
+                        ) from exc
                     continue
                 except Exception as exc:
                     last_exc = exc
+                    last_details = str(exc)
                     continue
 
             if data is None:
+                if last_exc and last_details:
+                    raise RuntimeError(f"Amvera request failed: {last_details}") from last_exc
                 if last_exc:
                     raise last_exc
                 raise RuntimeError("Amvera request failed without response")
