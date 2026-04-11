@@ -28,7 +28,7 @@
 
 - `AMVERA_LLM_API_KEY`
 - `AMVERA_LLM_BASE_URL` (endpoint вида `.../v1`)
-- `AMVERA_LLM_MODEL` (рекомендуется `llama8b` для стабильного старта)
+- `AMVERA_LLM_MODEL` (например `gpt-5` или `gpt-4.1`; важно, чтобы по этой модели была квота)
 
 ## Локальный запуск
 

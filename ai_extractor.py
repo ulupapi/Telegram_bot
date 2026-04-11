@@ -204,7 +204,6 @@ class AIExtractor:
         if endpoint == "gpt":
             if model != "gpt-4.1":
                 attempts.append(("gpt", "gpt-4.1"))
-            attempts.append(("llama", "llama8b"))
         elif endpoint == "llama" and model != "llama8b":
             attempts.append(("llama", "llama8b"))
 

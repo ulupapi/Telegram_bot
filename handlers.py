@@ -250,8 +250,8 @@ def _humanize_llm_error(exc: Exception) -> str:
         return "Слишком много запросов к LLM (429). Подождите немного и повторите."
     if "payment required" in text or "status=402" in text:
         return (
-            "Amvera вернул 402 Payment Required: у LLM-провайдера нет активных токенов/баланса. "
-            "Проверьте лимиты в разделе LLM и пополните квоту."
+            "Amvera вернул 402 Payment Required: неактивны токены/тариф для этой модели. "
+            "Проверьте, что AMVERA_LLM_MODEL соответствует модели с доступной квотой в разделе LLM."
         )
     if "502" in text or "bad gateway" in text:
         return (
