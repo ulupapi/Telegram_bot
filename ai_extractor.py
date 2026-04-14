@@ -216,11 +216,6 @@ class AIExtractor:
         }
 
         attempts = [(endpoint, model)]
-        if endpoint == "gpt":
-            if model != "gpt-4.1":
-                attempts.append(("gpt", "gpt-4.1"))
-        elif endpoint == "llama" and model != "llama8b":
-            attempts.append(("llama", "llama8b"))
 
         with httpx.Client(timeout=45.0) as client:
             data = None
