@@ -30,9 +30,11 @@ class AIExtractor:
         openai_base_url: str | None = None,
         amvera_api_key: str | None = None,
         amvera_base_url: str | None = None,
+        llm_timeout_seconds: int = 120,
     ) -> None:
         self.provider = provider.strip().lower()
         self.model = model
+        self._llm_timeout_seconds = max(10, int(llm_timeout_seconds))
         self._gemini_client = None
         self._openai_client = None
         self._amvera_api_key = None
@@ -217,7 +219,13 @@ class AIExtractor:
 
         attempts = [(endpoint, model)]
 
-        with httpx.Client(timeout=45.0) as client:
+        timeout = httpx.Timeout(
+            connect=10.0,
+            read=float(self._llm_timeout_seconds),
+            write=30.0,
+            pool=60.0,
+        )
+        with httpx.Client(timeout=timeout) as client:
             data = None
             last_exc: Exception | None = None
             last_details: str | None = None
@@ -227,40 +235,51 @@ class AIExtractor:
                     "model": attempt_model,
                     "messages": payload["messages"],
                 }
-                try:
-                    response = client.post(
-                        attempt_url,
-                        json=attempt_payload,
-                        headers=headers,
-                    )
-                    response.raise_for_status()
-                    data = response.json()
+                for retry_idx in range(2):
+                    try:
+                        response = client.post(
+                            attempt_url,
+                            json=attempt_payload,
+                            headers=headers,
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                        break
+                    except httpx.ReadTimeout as exc:
+                        last_exc = exc
+                        last_details = (
+                            "read timeout: "
+                            f"endpoint={attempt_endpoint}, model={attempt_model}, "
+                            f"timeout={self._llm_timeout_seconds}s, retry={retry_idx + 1}/2"
+                        )
+                        continue
+                    except httpx.HTTPStatusError as exc:
+                        last_exc = exc
+                        status = exc.response.status_code
+                        body = (exc.response.text or "").strip()
+                        if len(body) > 500:
+                            body = body[:500]
+                        last_details = (
+                            f"status={status}, endpoint={attempt_endpoint}, model={attempt_model}, "
+                            f"body={body}"
+                        )
+                        if status in {401, 403}:
+                            raise RuntimeError(
+                                "Amvera auth error: "
+                                f"status={status}, body={body}"
+                            ) from exc
+                        if status == 402:
+                            raise RuntimeError(
+                                "Amvera payment required: "
+                                f"status=402, endpoint={attempt_endpoint}, model={attempt_model}, body={body}"
+                            ) from exc
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        last_details = str(exc)
+                        break
+                if data is not None:
                     break
-                except httpx.HTTPStatusError as exc:
-                    last_exc = exc
-                    status = exc.response.status_code
-                    body = (exc.response.text or "").strip()
-                    if len(body) > 500:
-                        body = body[:500]
-                    last_details = (
-                        f"status={status}, endpoint={attempt_endpoint}, model={attempt_model}, "
-                        f"body={body}"
-                    )
-                    if status in {401, 403}:
-                        raise RuntimeError(
-                            "Amvera auth error: "
-                            f"status={status}, body={body}"
-                        ) from exc
-                    if status == 402:
-                        raise RuntimeError(
-                            "Amvera payment required: "
-                            f"status=402, endpoint={attempt_endpoint}, model={attempt_model}, body={body}"
-                        ) from exc
-                    continue
-                except Exception as exc:
-                    last_exc = exc
-                    last_details = str(exc)
-                    continue
 
             if data is None:
                 if last_exc and last_details:

@@ -30,6 +30,7 @@ class Settings:
     postgres_dsn: str | None
     sqlite_path: str
     context_messages_limit: int
+    llm_timeout_seconds: int
 
 
 def load_settings() -> Settings:
@@ -75,6 +76,7 @@ def load_settings() -> Settings:
         postgres_dsn=postgres_dsn,
         sqlite_path=os.getenv("SQLITE_PATH", "data/bot.db"),
         context_messages_limit=int(os.getenv("CONTEXT_MESSAGES_LIMIT", "120")),
+        llm_timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
     )
 
 
@@ -122,6 +124,7 @@ async def main() -> None:
         openai_base_url=settings.openai_base_url,
         amvera_api_key=settings.amvera_api_key,
         amvera_base_url=settings.amvera_base_url,
+        llm_timeout_seconds=settings.llm_timeout_seconds,
     )
 
     bot = Bot(token=settings.telegram_bot_token)
