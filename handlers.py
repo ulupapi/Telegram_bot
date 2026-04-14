@@ -12,6 +12,7 @@ from ai_extractor import AIExtractor, StatusReport
 from database import Database
 
 logger = logging.getLogger(__name__)
+STATUS_ORDER = ["В ожидании", "В работе", "Завершена", "Отклонена", "Отозвана"]
 
 
 def build_router(
@@ -124,7 +125,7 @@ def build_router(
         ):
             return
 
-        author = message.from_user.full_name if message.from_user else "Unknown"
+        author = _telegram_author(message)
         created_at = message.date.replace(tzinfo=timezone.utc).isoformat()
 
         await asyncio.to_thread(
@@ -151,6 +152,7 @@ def _render_status(report: StatusReport) -> str:
     lines.extend(_render_section("Что сделано", report.done, "Новых завершенных задач нет."))
     lines.extend(_render_section("Что в работе", report.in_progress, "Активных задач не найдено."))
     lines.extend(_render_section("Что зависло", report.blocked, "Блокеров не найдено."))
+    lines.extend(_render_task_registry(report))
     return "\n".join(lines)
 
 
@@ -163,6 +165,38 @@ def _render_section(title: str, items: list[str], empty_text: str) -> list[str]:
     for item in items:
         lines.append(f"• {item}")
     return lines
+
+
+def _render_task_registry(report: StatusReport) -> list[str]:
+    lines = ["\nРеестр задач:"]
+    if not report.tasks:
+        lines.append("• Задачи не найдены.")
+        return lines
+
+    for status in STATUS_ORDER:
+        status_tasks = [task for task in report.tasks if task.status == status]
+        if not status_tasks:
+            continue
+        lines.append(f"\n{status}:")
+        for task in status_tasks:
+            lines.append(f"• [{task.external_id}] {task.title}")
+            if task.description:
+                lines.append(f"  Описание: {task.description}")
+            lines.append(f"  Дедлайн: {task.deadline_date or '—'}")
+            lines.append(f"  Автор: {task.author_name}")
+            lines.append(f"  Исполнитель: {task.assignee}")
+    return lines
+
+
+def _telegram_author(message: Message) -> str:
+    user = message.from_user
+    if user is None:
+        return "Unknown"
+    if user.username:
+        return f"@{user.username}"
+    if user.full_name:
+        return user.full_name
+    return f"user_{user.id}"
 
 
 def _scope_from_message(message: Message) -> tuple[int, int]:

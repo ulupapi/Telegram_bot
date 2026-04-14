@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Iterable
 
 import httpx
@@ -93,12 +94,18 @@ class AIExtractor:
                 if not title:
                     continue
                 external_id = str(item.get("id", f"T{idx}")).strip() or f"T{idx}"
-                assignee = str(item.get("assignee", "Не указан")).strip() or "Не указан"
-                status = self._normalize_status(str(item.get("status", "in_progress")))
+                description = str(item.get("description", "")).strip()
+                deadline_date = self._normalize_deadline(str(item.get("deadline", "")).strip())
+                author_name = str(item.get("author", "Не указан")).strip() or "Не указан"
+                assignee = str(item.get("assignee", "Не назначен")).strip() or "Не назначен"
+                status = self._normalize_status(str(item.get("status", "В ожидании")))
                 tasks.append(
                     TaskRecord(
                         external_id=external_id,
                         title=title,
+                        description=description,
+                        deadline_date=deadline_date,
+                        author_name=author_name,
                         assignee=assignee,
                         status=status,
                     )
@@ -123,23 +130,32 @@ class AIExtractor:
 
         return (
             "Ты аналитик задач команды. На входе обсуждение из одной Telegram-ветки.\n"
-            "Выдели результат в трех блоках:\n"
-            "1) done - что уже сделано,\n"
-            "2) in_progress - что в работе,\n"
-            "3) blocked - что зависло или ждет внешних действий.\n"
-            "Также верни tasks - массив структурированных задач.\n"
-            "Отвечай строго JSON-объектом без markdown и без комментариев.\n\n"
+            "Каждая строка содержит дату, автора сообщения (ник/имя) и текст.\n"
+            "Нужно выделить задачи и определить автора постановки, исполнителя, статус, дедлайн.\n"
+            "Если исполнитель не ясен, ставь 'Не назначен'. Если автор постановки не ясен, ставь 'Не указан'.\n"
+            "Если дедлайн не указан явно, deadline = ''.\n\n"
+            "Верни строго JSON-объект без markdown и комментариев.\n"
+            "Допустимые статусы задачи (строго один из):\n"
+            "В ожидании, В работе, Завершена, Отклонена, Отозвана.\n\n"
             "Формат:\n"
             "{\n"
-            '  "done": ["..."],\n'
-            '  "in_progress": ["..."],\n'
-            '  "blocked": ["..."],\n'
+            '  "done": ["краткие пункты: что завершили"],\n'
+            '  "in_progress": ["краткие пункты: что в работе"],\n'
+            '  "blocked": ["краткие пункты: что мешает"],\n'
             '  "tasks": [\n'
-            '    {"id":"T1","title":"...","assignee":"...","status":"done|in_progress|blocked"}\n'
+            "    {\n"
+            '      "id":"T1",\n'
+            '      "title":"Короткое название задачи",\n'
+            '      "description":"Подробное описание",\n'
+            '      "deadline":"YYYY-MM-DD или пустая строка",\n'
+            '      "author":"Кто поставил задачу",\n'
+            '      "assignee":"Кто делает задачу",\n'
+            '      "status":"В ожидании|В работе|Завершена|Отклонена|Отозвана"\n'
+            "    }\n"
             "  ]\n"
             "}\n\n"
             "Если данных по секции нет, верни пустой массив.\n"
-            "Используй короткие, конкретные формулировки.\n\n"
+            "Не придумывай факты. Опирайся только на текст диалога.\n\n"
             "Диалог:\n"
             f"{dialog}"
         )
@@ -185,7 +201,6 @@ class AIExtractor:
                 "AMVERA_LLM_BASE_URL must start with http:// or https://"
             )
         endpoint = self._amvera_endpoint_for_model(model)
-        url = f"{base_url}/models/{endpoint}"
 
         payload = {
             "model": model,
@@ -332,9 +347,25 @@ class AIExtractor:
         return result
 
     def _normalize_status(self, raw_status: str) -> str:
-        value = raw_status.strip().lower().replace("-", "_").replace(" ", "_")
-        if value in {"done", "completed", "ready", "сделано", "готово"}:
-            return "done"
-        if value in {"blocked", "stuck", "waiting", "зависло", "ожидание"}:
-            return "blocked"
-        return "in_progress"
+        value = " ".join(raw_status.strip().lower().replace("-", " ").split())
+        if value in {"в ожидании", "ожидание", "pending", "todo", "to do"}:
+            return "В ожидании"
+        if value in {"в работе", "работа", "in progress", "in_progress", "doing"}:
+            return "В работе"
+        if value in {"завершена", "завершено", "done", "completed", "готово"}:
+            return "Завершена"
+        if value in {"отклонена", "rejected", "declined", "cancelled by manager"}:
+            return "Отклонена"
+        if value in {"отозвана", "withdrawn", "canceled", "cancelled"}:
+            return "Отозвана"
+        return "В ожидании"
+
+    def _normalize_deadline(self, raw_deadline: str) -> str:
+        text = raw_deadline.strip()
+        if not text:
+            return ""
+        try:
+            parsed = date.fromisoformat(text)
+            return parsed.isoformat()
+        except ValueError:
+            return ""

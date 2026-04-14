@@ -26,6 +26,8 @@ class Settings:
     openai_base_url: str | None
     amvera_api_key: str | None
     amvera_base_url: str | None
+    db_backend: str
+    postgres_dsn: str | None
     sqlite_path: str
     context_messages_limit: int
 
@@ -43,13 +45,15 @@ def load_settings() -> Settings:
     openai_base_url: str | None = None
     amvera_api_key: str | None = None
     amvera_base_url: str | None = None
+    db_backend = os.getenv("DB_BACKEND", "auto").strip().lower()
+    postgres_dsn = parse_optional_str("POSTGRES_DSN")
 
     if llm_provider == "openai":
         llm_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
         openai_api_key = os.getenv("OPENAI_API_KEY")
         openai_base_url = parse_optional_str("OPENAI_BASE_URL")
     elif llm_provider == "amvera":
-        llm_model = os.getenv("AMVERA_LLM_MODEL", "llama8b").strip()
+        llm_model = os.getenv("AMVERA_LLM_MODEL", "gpt-5").strip()
         amvera_api_key = parse_optional_str("AMVERA_LLM_API_KEY")
         amvera_base_url = parse_optional_str("AMVERA_LLM_BASE_URL")
     else:
@@ -67,6 +71,8 @@ def load_settings() -> Settings:
         openai_base_url=openai_base_url,
         amvera_api_key=amvera_api_key,
         amvera_base_url=amvera_base_url,
+        db_backend=db_backend,
+        postgres_dsn=postgres_dsn,
         sqlite_path=os.getenv("SQLITE_PATH", "data/bot.db"),
         context_messages_limit=int(os.getenv("CONTEXT_MESSAGES_LIMIT", "120")),
     )
@@ -101,7 +107,11 @@ async def main() -> None:
     )
     settings = load_settings()
 
-    db = Database(settings.sqlite_path)
+    db = Database(
+        settings.sqlite_path,
+        db_backend=settings.db_backend,
+        postgres_dsn=settings.postgres_dsn,
+    )
     db.init_schema()
 
     extractor = AIExtractor(
