@@ -287,9 +287,9 @@ def _humanize_llm_error(exc: Exception) -> str:
             "Amvera вернул 402 Payment Required: неактивны токены/тариф для этой модели. "
             "Проверьте, что AMVERA_LLM_MODEL соответствует модели с доступной квотой в разделе LLM."
         )
-    if "502" in text or "bad gateway" in text:
+    if "502" in text or "504" in text or "bad gateway" in text or "gateway time-out" in text:
         return (
-            "LLM-шлюз временно недоступен (502). "
+            "LLM-шлюз временно недоступен (502/504). "
             "Попробуйте еще раз через 20-30 секунд."
         )
     if "read timeout" in text or "timed out" in text:

@@ -30,10 +30,14 @@ class AIExtractor:
         openai_base_url: str | None = None,
         amvera_api_key: str | None = None,
         amvera_base_url: str | None = None,
+        amvera_fallback_model: str | None = "gpt-4.1",
         llm_timeout_seconds: int = 120,
     ) -> None:
         self.provider = provider.strip().lower()
         self.model = model
+        self._amvera_fallback_model = (
+            (amvera_fallback_model or "").strip() or None
+        )
         self._llm_timeout_seconds = max(10, int(llm_timeout_seconds))
         self._gemini_client = None
         self._openai_client = None
@@ -218,6 +222,17 @@ class AIExtractor:
         }
 
         attempts = [(endpoint, model)]
+        if (
+            endpoint == "gpt"
+            and self._amvera_fallback_model
+            and self._amvera_fallback_model != model
+        ):
+            attempts.append(
+                (
+                    self._amvera_endpoint_for_model(self._amvera_fallback_model),
+                    self._amvera_fallback_model,
+                )
+            )
 
         timeout = httpx.Timeout(
             connect=10.0,
@@ -273,6 +288,8 @@ class AIExtractor:
                                 "Amvera payment required: "
                                 f"status=402, endpoint={attempt_endpoint}, model={attempt_model}, body={body}"
                             ) from exc
+                        if status in {502, 504} and retry_idx == 0:
+                            continue
                         break
                     except Exception as exc:
                         last_exc = exc

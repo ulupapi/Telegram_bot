@@ -26,6 +26,7 @@ class Settings:
     openai_base_url: str | None
     amvera_api_key: str | None
     amvera_base_url: str | None
+    amvera_fallback_model: str | None
     db_backend: str
     postgres_dsn: str | None
     sqlite_path: str
@@ -46,6 +47,7 @@ def load_settings() -> Settings:
     openai_base_url: str | None = None
     amvera_api_key: str | None = None
     amvera_base_url: str | None = None
+    amvera_fallback_model: str | None = None
     db_backend = os.getenv("DB_BACKEND", "auto").strip().lower()
     postgres_dsn = parse_optional_str("POSTGRES_DSN")
 
@@ -57,6 +59,7 @@ def load_settings() -> Settings:
         llm_model = os.getenv("AMVERA_LLM_MODEL", "gpt-5").strip()
         amvera_api_key = parse_optional_str("AMVERA_LLM_API_KEY")
         amvera_base_url = parse_optional_str("AMVERA_LLM_BASE_URL")
+        amvera_fallback_model = parse_optional_str("AMVERA_LLM_FALLBACK_MODEL") or "gpt-4.1"
     else:
         llm_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
         gemini_api_key = parse_optional_str("GEMINI_API_KEY")
@@ -72,6 +75,7 @@ def load_settings() -> Settings:
         openai_base_url=openai_base_url,
         amvera_api_key=amvera_api_key,
         amvera_base_url=amvera_base_url,
+        amvera_fallback_model=amvera_fallback_model,
         db_backend=db_backend,
         postgres_dsn=postgres_dsn,
         sqlite_path=os.getenv("SQLITE_PATH", "data/bot.db"),
@@ -124,6 +128,7 @@ async def main() -> None:
         openai_base_url=settings.openai_base_url,
         amvera_api_key=settings.amvera_api_key,
         amvera_base_url=settings.amvera_base_url,
+        amvera_fallback_model=settings.amvera_fallback_model,
         llm_timeout_seconds=settings.llm_timeout_seconds,
     )
 
