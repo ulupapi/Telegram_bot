@@ -130,7 +130,7 @@ class AIExtractor:
             lines.append(f"[{msg.created_at}] {msg.user_name}: {msg.text}")
         dialog = "\n".join(lines)
         # Defensive cap to reduce provider-side 400 errors on very large payloads.
-        max_dialog_chars = 4000
+        max_dialog_chars = 2500
         if len(dialog) > max_dialog_chars:
             dialog = dialog[-max_dialog_chars:]
 
@@ -222,17 +222,19 @@ class AIExtractor:
         }
 
         attempts = [(endpoint, model)]
-        if (
-            endpoint == "gpt"
-            and self._amvera_fallback_model
-            and self._amvera_fallback_model != model
-        ):
-            attempts.append(
-                (
-                    self._amvera_endpoint_for_model(self._amvera_fallback_model),
-                    self._amvera_fallback_model,
+        if endpoint == "gpt":
+            candidate_fallbacks: list[str] = []
+            if self._amvera_fallback_model and self._amvera_fallback_model != model:
+                candidate_fallbacks.append(self._amvera_fallback_model)
+            if model != "gpt-4.1" and "gpt-4.1" not in candidate_fallbacks:
+                candidate_fallbacks.append("gpt-4.1")
+            for fallback_model in candidate_fallbacks:
+                attempts.append(
+                    (
+                        self._amvera_endpoint_for_model(fallback_model),
+                        fallback_model,
+                    )
                 )
-            )
 
         timeout = httpx.Timeout(
             connect=10.0,
@@ -300,7 +302,10 @@ class AIExtractor:
 
             if data is None:
                 if last_exc and last_details:
-                    raise RuntimeError(f"Amvera request failed: {last_details}") from last_exc
+                    attempts_view = ", ".join([f"{ep}:{m}" for ep, m in attempts])
+                    raise RuntimeError(
+                        f"Amvera request failed: {last_details}; attempts=[{attempts_view}]"
+                    ) from last_exc
                 if last_exc:
                     raise last_exc
                 raise RuntimeError("Amvera request failed without response")

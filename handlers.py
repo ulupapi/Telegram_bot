@@ -290,7 +290,7 @@ def _humanize_llm_error(exc: Exception) -> str:
     if "502" in text or "504" in text or "bad gateway" in text or "gateway time-out" in text:
         return (
             "LLM-шлюз временно недоступен (502/504). "
-            "Попробуйте еще раз через 20-30 секунд."
+            "Попробуйте еще раз через 20-30 секунд или временно переключите модель на gpt-4.1."
         )
     if "read timeout" in text or "timed out" in text:
         return (
