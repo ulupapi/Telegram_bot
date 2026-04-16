@@ -61,6 +61,8 @@ class _DatabaseBackend(Protocol):
         limit: int,
     ) -> list[StoredMessage]: ...
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None: ...
+    def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]: ...
+    def clear_all(self) -> tuple[int, int, int]: ...
     def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None: ...
     def set_manual_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None: ...
     def resolve_scope_alias(self, *, alias: str) -> tuple[int, int] | None: ...
@@ -221,6 +223,32 @@ class _SQLiteBackend:
                             task.status,
                         ),
                     )
+
+    def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
+        with self._lock:
+            with self.conn:
+                cur_messages = self.conn.execute(
+                    """
+                    DELETE FROM messages
+                    WHERE chat_id = ? AND thread_id = ?
+                    """,
+                    (chat_id, thread_id),
+                )
+                deleted_messages = max(0, cur_messages.rowcount)
+                cur_tasks = self.conn.execute("DELETE FROM tasks")
+                deleted_tasks = max(0, cur_tasks.rowcount)
+        return deleted_messages, deleted_tasks
+
+    def clear_all(self) -> tuple[int, int, int]:
+        with self._lock:
+            with self.conn:
+                cur_messages = self.conn.execute("DELETE FROM messages")
+                deleted_messages = max(0, cur_messages.rowcount)
+                cur_tasks = self.conn.execute("DELETE FROM tasks")
+                deleted_tasks = max(0, cur_tasks.rowcount)
+                cur_aliases = self.conn.execute("DELETE FROM scope_aliases")
+                deleted_aliases = max(0, cur_aliases.rowcount)
+        return deleted_messages, deleted_tasks, deleted_aliases
 
     def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None:
         clean_alias = alias.strip().lower()
@@ -461,6 +489,34 @@ class _PostgresBackend:
                             ),
                         )
 
+    def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
+        with self._lock:
+            with self.conn.transaction():
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        DELETE FROM messages
+                        WHERE chat_id = %s AND thread_id = %s
+                        """,
+                        (chat_id, thread_id),
+                    )
+                    deleted_messages = max(0, cur.rowcount)
+                    cur.execute("DELETE FROM tasks")
+                    deleted_tasks = max(0, cur.rowcount)
+        return deleted_messages, deleted_tasks
+
+    def clear_all(self) -> tuple[int, int, int]:
+        with self._lock:
+            with self.conn.transaction():
+                with self.conn.cursor() as cur:
+                    cur.execute("DELETE FROM messages")
+                    deleted_messages = max(0, cur.rowcount)
+                    cur.execute("DELETE FROM tasks")
+                    deleted_tasks = max(0, cur.rowcount)
+                    cur.execute("DELETE FROM scope_aliases")
+                    deleted_aliases = max(0, cur.rowcount)
+        return deleted_messages, deleted_tasks, deleted_aliases
+
     def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None:
         clean_alias = alias.strip().lower()
         if not clean_alias:
@@ -592,6 +648,12 @@ class Database:
 
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None:
         self._backend.replace_tasks(tasks)
+
+    def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
+        return self._backend.clear_scope(chat_id=chat_id, thread_id=thread_id)
+
+    def clear_all(self) -> tuple[int, int, int]:
+        return self._backend.clear_all()
 
     def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None:
         self._backend.learn_scope_alias(alias=alias, chat_id=chat_id, thread_id=thread_id)

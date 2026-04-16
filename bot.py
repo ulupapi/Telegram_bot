@@ -6,7 +6,12 @@ import os
 from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeDefault,
+)
 from dotenv import load_dotenv
 
 from ai_extractor import AIExtractor
@@ -144,13 +149,17 @@ async def main() -> None:
         )
     )
 
-    await bot.set_my_commands(
-        [
-            BotCommand(command="status", description="Сводка: сделано / в работе / зависло"),
-            BotCommand(command="bind", description="Привязать имя к текущему чату/ветке"),
-            BotCommand(command="where", description="Показать текущий chat_id/topic_id"),
-        ]
-    )
+    commands = [
+        BotCommand(command="status", description="Сводка: сделано / в работе / зависло"),
+        BotCommand(command="bind", description="Привязать имя к текущему чату/ветке"),
+        BotCommand(command="where", description="Показать текущий chat_id/topic_id"),
+        BotCommand(command="clear_db", description="Очистить БД: /clear_db или /clear_db all"),
+        BotCommand(command="clear", description="Быстрая очистка: /clear или /clear all"),
+        BotCommand(command="help", description="Показать список команд"),
+    ]
+    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+    await bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
+    await bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())

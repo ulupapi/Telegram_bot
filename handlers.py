@@ -57,33 +57,30 @@ def build_router(
                 "Можно сохранить имя: /bind Задания"
             )
 
-    @router.message(Command("status"))
-    async def cmd_status(message: Message) -> None:
-        current_chat_id, current_thread_id = _scope_from_message(message)
-        await _learn_auto_aliases(
-            db=db,
-            message=message,
-            chat_id=current_chat_id,
-            thread_id=current_thread_id,
+    @router.message(Command("help"))
+    async def cmd_help(message: Message) -> None:
+        await message.answer(
+            "Команды бота:\n"
+            "• /status [название] — сводка и задачи (каждая задача отдельным сообщением)\n"
+            "• /bind <название> — привязать алиас к текущему чату/ветке\n"
+            "• /where — показать текущий chat_id/topic_id\n"
+            "• /clear_db [название] — очистить данные текущего/указанного контекста\n"
+            "• /clear_db all — очистить всю БД\n"
+            "• /clear [название] — короткий алиас для /clear_db"
         )
 
-        alias_raw = _command_argument(message)
-        if alias_raw:
-            alias = _normalize_alias(alias_raw)
-            resolved = await asyncio.to_thread(db.resolve_scope_alias, alias=alias)
-            if not resolved:
-                await message.answer(
-                    f"Не нашел цель «{alias_raw}». "
-                    f"Откройте нужный чат/ветку и выполните: /bind {alias_raw}"
-                )
-                return
-            scope_chat_id, scope_thread_id = resolved
-        elif target_chat_id is not None:
-            scope_chat_id = target_chat_id
-            scope_thread_id = target_topic_id or 0
-        else:
-            scope_chat_id = current_chat_id
-            scope_thread_id = current_thread_id
+    @router.message(Command("status"))
+    async def cmd_status(message: Message) -> None:
+        scope = await _resolve_scope_from_message_or_alias(
+            message=message,
+            db=db,
+            target_chat_id=target_chat_id,
+            target_topic_id=target_topic_id,
+            alias_raw=_command_argument(message),
+        )
+        if scope is None:
+            return
+        scope_chat_id, scope_thread_id = scope
 
         rows = await asyncio.to_thread(
             db.get_recent_thread_messages,
@@ -106,7 +103,49 @@ def build_router(
             await message.answer(_humanize_llm_error(exc))
             return
 
-        await message.answer(_render_status(report))
+        for chunk in _render_status_messages(report):
+            await message.answer(chunk)
+
+    @router.message(Command(commands=["clear_db", "clear"]))
+    async def cmd_clear_db(message: Message) -> None:
+        arg_raw = _command_argument(message)
+        arg_clean = _normalize_alias(arg_raw) if arg_raw else ""
+        if arg_clean in {"all", "все"}:
+            deleted_messages, deleted_tasks, deleted_aliases = await asyncio.to_thread(
+                db.clear_all
+            )
+            await message.answer(
+                "🧹 База очищена полностью.\n"
+                f"• Сообщений удалено: {deleted_messages}\n"
+                f"• Задач удалено: {deleted_tasks}\n"
+                f"• Привязок удалено: {deleted_aliases}"
+            )
+            return
+
+        scope = await _resolve_scope_from_message_or_alias(
+            message=message,
+            db=db,
+            target_chat_id=target_chat_id,
+            target_topic_id=target_topic_id,
+            alias_raw=arg_raw,
+        )
+        if scope is None:
+            return
+        scope_chat_id, scope_thread_id = scope
+
+        deleted_messages, deleted_tasks = await asyncio.to_thread(
+            db.clear_scope,
+            chat_id=scope_chat_id,
+            thread_id=scope_thread_id,
+        )
+        scope_suffix = f", topic_id={scope_thread_id}" if scope_thread_id else ""
+        await message.answer(
+            "🧹 Контекст очищен.\n"
+            f"• Сообщений удалено: {deleted_messages}\n"
+            f"• Задач удалено: {deleted_tasks}\n"
+            f"• Контекст: chat_id={scope_chat_id}{scope_suffix}\n"
+            "Чтобы очистить все данные сразу, используйте: /clear_db all"
+        )
 
     @router.message()
     async def collect_messages(message: Message) -> None:
@@ -148,27 +187,123 @@ def build_router(
 
 
 def _render_status(report: StatusReport) -> str:
-    lines = ["Сводка по ветке"]
-    lines.extend(_render_section("Что сделано", report.done, "Новых завершенных задач нет."))
-    lines.extend(_render_section("Что в работе", report.in_progress, "Активных задач не найдено."))
-    lines.extend(_render_section("Что зависло", report.blocked, "Блокеров не найдено."))
+    lines = ["📌 Сводка по ветке"]
+    lines.extend(
+        _render_section(
+            "✅ Что сделано",
+            report.done,
+            "Новых завершенных задач нет.",
+        )
+    )
+    lines.extend(
+        _render_section(
+            "🛠 Что в работе",
+            report.in_progress,
+            "Активных задач не найдено.",
+        )
+    )
+    lines.extend(
+        _render_section(
+            "⛔ Что зависло",
+            report.blocked,
+            "Блокеров не найдено.",
+        )
+    )
     lines.extend(_render_task_registry(report))
     return "\n".join(lines)
 
 
+def _render_status_messages(report: StatusReport) -> list[str]:
+    messages = [_render_summary_message(report)]
+    if not report.tasks:
+        messages.append("📋 Реестр задач\n• Задачи не найдены.")
+        return messages
+
+    ordered_tasks = _ordered_tasks(report)
+    for idx, task in enumerate(ordered_tasks, start=1):
+        messages.append(_render_task_message(task_index=idx, total=len(ordered_tasks), task=task))
+    return messages
+
+
+def _render_summary_message(report: StatusReport) -> str:
+    lines = ["📌 Сводка по ветке"]
+    lines.extend(
+        _render_section(
+            "✅ Что сделано",
+            report.done,
+            "Новых завершенных задач нет.",
+        )
+    )
+    lines.extend(
+        _render_section(
+            "🛠 Что в работе",
+            report.in_progress,
+            "Активных задач не найдено.",
+        )
+    )
+    lines.extend(
+        _render_section(
+            "⛔ Что зависло",
+            report.blocked,
+            "Блокеров не найдено.",
+        )
+    )
+    lines.append("\n📋 Статусы задач:")
+    if not report.tasks:
+        lines.append("• Задач нет.")
+    else:
+        for status in STATUS_ORDER:
+            count = sum(1 for task in report.tasks if task.status == status)
+            if count:
+                lines.append(f"• {_status_icon(status)} {status}: {count}")
+    return "\n".join(lines)
+
+
+def _ordered_tasks(report: StatusReport):
+    ordered = []
+    for status in STATUS_ORDER:
+        status_tasks = [task for task in report.tasks if task.status == status]
+        ordered.extend(status_tasks)
+    return ordered
+
+
+def _render_task_message(*, task_index: int, total: int, task) -> str:
+    description = _trim_text(task.description, limit=900) or "Не указано"
+    lines = [
+        f"🧩 Задача {task_index} из {total}",
+        f"📅 Дедлайн: {task.deadline_date or '—'}",
+        "🌐 Основная информация:",
+        f"1. Название: {task.title}",
+        f"2. Автор: {task.author_name}",
+        f"3. Исполнитель: {task.assignee}",
+        f"4. Статус: {_status_icon(task.status)} {task.status}",
+        f"5. ID: {task.external_id}",
+        "6. Описание:",
+        f"«{description}»",
+    ]
+    return "\n".join(lines)
+
+
+def _trim_text(text: str, *, limit: int) -> str:
+    value = (text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "…"
+
+
 def _render_section(title: str, items: list[str], empty_text: str) -> list[str]:
-    lines = [f"\n{title}:"]
+    lines = [f"\n{title}"]
     if not items:
         lines.append(f"• {empty_text}")
         return lines
 
-    for item in items:
-        lines.append(f"• {item}")
+    for idx, item in enumerate(items, start=1):
+        lines.append(f"{idx}. {item}")
     return lines
 
 
 def _render_task_registry(report: StatusReport) -> list[str]:
-    lines = ["\nРеестр задач:"]
+    lines = ["\n📋 Реестр задач"]
     if not report.tasks:
         lines.append("• Задачи не найдены.")
         return lines
@@ -177,15 +312,32 @@ def _render_task_registry(report: StatusReport) -> list[str]:
         status_tasks = [task for task in report.tasks if task.status == status]
         if not status_tasks:
             continue
-        lines.append(f"\n{status}:")
-        for task in status_tasks:
-            lines.append(f"• [{task.external_id}] {task.title}")
+        lines.append(f"\n{_status_icon(status)} {status} ({len(status_tasks)})")
+        for idx, task in enumerate(status_tasks, start=1):
+            lines.append(f"{idx}. {task.title}")
+            lines.append(f"   🆔 {task.external_id}")
+            lines.append(f"   📅 Дедлайн: {task.deadline_date or '—'}")
+            lines.append(f"   👤 Автор: {task.author_name}")
+            lines.append(f"   👷 Исполнитель: {task.assignee}")
+            lines.append(f"   🏷 Статус: {task.status}")
             if task.description:
-                lines.append(f"  Описание: {task.description}")
-            lines.append(f"  Дедлайн: {task.deadline_date or '—'}")
-            lines.append(f"  Автор: {task.author_name}")
-            lines.append(f"  Исполнитель: {task.assignee}")
+                lines.append("   📝 Описание:")
+                lines.append(f"   └ {task.description}")
     return lines
+
+
+def _status_icon(status: str) -> str:
+    if status == "В ожидании":
+        return "🟡"
+    if status == "В работе":
+        return "🔵"
+    if status == "Завершена":
+        return "🟢"
+    if status == "Отклонена":
+        return "🔴"
+    if status == "Отозвана":
+        return "⚪"
+    return "▫️"
 
 
 def _telegram_author(message: Message) -> str:
@@ -257,6 +409,38 @@ async def _learn_auto_aliases(
             chat_id=chat_id,
             thread_id=thread_id,
         )
+
+
+async def _resolve_scope_from_message_or_alias(
+    *,
+    message: Message,
+    db: Database,
+    target_chat_id: int | None,
+    target_topic_id: int | None,
+    alias_raw: str,
+) -> tuple[int, int] | None:
+    current_chat_id, current_thread_id = _scope_from_message(message)
+    await _learn_auto_aliases(
+        db=db,
+        message=message,
+        chat_id=current_chat_id,
+        thread_id=current_thread_id,
+    )
+
+    if alias_raw:
+        alias = _normalize_alias(alias_raw)
+        resolved = await asyncio.to_thread(db.resolve_scope_alias, alias=alias)
+        if not resolved:
+            await message.answer(
+                f"Не нашел цель «{alias_raw}». "
+                f"Откройте нужный чат/ветку и выполните: /bind {alias_raw}"
+            )
+            return None
+        return resolved
+
+    if target_chat_id is not None:
+        return target_chat_id, target_topic_id or 0
+    return current_chat_id, current_thread_id
 
 
 def _extract_topic_name(message: Message) -> str:

@@ -116,6 +116,7 @@ class AIExtractor:
                         status=status,
                     )
                 )
+        tasks = self._deduplicate_tasks(tasks)
 
         return StatusReport(
             done=done,
@@ -405,3 +406,45 @@ class AIExtractor:
             return parsed.isoformat()
         except ValueError:
             return ""
+
+    def _deduplicate_tasks(self, tasks: list[TaskRecord]) -> list[TaskRecord]:
+        unique: list[TaskRecord] = []
+        seen_keys: set[tuple[str, str, str, str]] = set()
+        seen_external_ids: set[str] = set()
+        next_auto_id = 1
+
+        for task in tasks:
+            identity = (
+                self._normalize_identity_part(task.title),
+                self._normalize_identity_part(task.author_name),
+                self._normalize_identity_part(task.assignee),
+                (task.deadline_date or "").strip(),
+            )
+            if identity in seen_keys:
+                continue
+            seen_keys.add(identity)
+
+            external_id = task.external_id.strip() or f"T{next_auto_id}"
+            if external_id in seen_external_ids:
+                while f"T{next_auto_id}" in seen_external_ids:
+                    next_auto_id += 1
+                external_id = f"T{next_auto_id}"
+            seen_external_ids.add(external_id)
+            next_auto_id += 1
+
+            unique.append(
+                TaskRecord(
+                    external_id=external_id,
+                    title=task.title,
+                    description=task.description,
+                    deadline_date=task.deadline_date,
+                    author_name=task.author_name,
+                    assignee=task.assignee,
+                    status=task.status,
+                )
+            )
+
+        return unique
+
+    def _normalize_identity_part(self, value: str) -> str:
+        return " ".join((value or "").strip().lower().split())
