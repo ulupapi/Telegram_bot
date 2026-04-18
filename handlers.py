@@ -23,10 +23,7 @@ logger = logging.getLogger(__name__)
 STATUS_ORDER = ["В ожидании", "В работе", "Завершена", "Отклонена", "Отозвана"]
 
 BTN_SUMMARY = "📊 Получить общую сводку"
-BTN_EDIT_TASK = "✏️ Режим редактирования"
 BTN_HELP = "❓ Помощь"
-BTN_ADD_TASK = "➕ Добавить задачу из ответа"
-BTN_EDIT_CLOSE = "✅ Завершить редактирование"
 BTN_DEV_CLEAR_SCOPE = "🧹 Очистить текущий контекст"
 BTN_DEV_CLEAR_ALL = "🧨 Очистить всю БД"
 BTN_DEV_SCHEDULE = "🕒 Параметры расписания"
@@ -35,17 +32,7 @@ BTN_DEV_BACK = "🔙 В обычный режим"
 BTN_DEV_ENTER = "🛠 Режим программиста"
 BTN_DEV_EXIT = "👤 Обычный режим"
 
-EDIT_MODE_SCOPES: set[tuple[int, int]] = set()
 DEV_MODE_SCOPES: set[tuple[int, int]] = set()
-
-STATUS_TO_CODE = {
-    "В ожидании": "wait",
-    "В работе": "work",
-    "Завершена": "done",
-    "Отклонена": "reject",
-    "Отозвана": "revoke",
-}
-CODE_TO_STATUS = {value: key for key, value in STATUS_TO_CODE.items()}
 
 
 def build_router(
@@ -75,7 +62,7 @@ def build_router(
     async def on_start(message: Message) -> None:
         chat_id, thread_id = _scope_from_message(message)
         await message.answer(
-            "Готов к работе. Используйте кнопки внизу для сводки и редактирования.",
+            "Готов к работе. Отправляйте сообщения в чат и нажимайте кнопку сводки.",
             reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
         )
 
@@ -85,15 +72,8 @@ def build_router(
         dev_mode = _is_dev_mode_enabled(chat_id=chat_id, thread_id=thread_id)
         await message.answer(
             "Пользовательские действия:\n"
-            f"• {BTN_SUMMARY} — получить свежую сводку\n"
-            f"• {BTN_EDIT_TASK} — инструкция по ручному редактированию\n\n"
-            "Как добавить задачу вручную:\n"
-            f"• Включите {BTN_EDIT_TASK}\n"
-            f"• Ответьте на исходное сообщение и нажмите {BTN_ADD_TASK}\n\n"
-            "Как редактировать задачу:\n"
-            "1. Ответьте на карточку задачи.\n"
-            "2. Напишите изменения построчно, например:\n"
-            "статус: В работе\nисполнитель: @username\nдедлайн: 2026-04-25",
+            f"• Просто отправляйте рабочие сообщения в чат\n"
+            f"• Нажмите {BTN_SUMMARY} — бот отправит контекст в LLM и покажет задачи",
             reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
         )
         await message.answer(
@@ -110,65 +90,6 @@ def build_router(
             db=db,
             extractor=extractor,
             context_messages_limit=context_messages_limit,
-        )
-
-    @router.message(F.text == BTN_EDIT_TASK)
-    async def enable_edit_mode(message: Message) -> None:
-        chat_id, thread_id = _scope_from_message(message)
-        _set_edit_mode(chat_id=chat_id, thread_id=thread_id, enabled=True)
-        await message.answer(
-            "✏️ Режим редактирования включен.\n"
-            "Теперь можно:\n"
-            f"• {BTN_ADD_TASK} (по reply)\n"
-            "• менять статус кнопками в карточках\n"
-            "• править задачу ответом на карточку",
-            reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
-        )
-
-    @router.message(F.text == BTN_EDIT_CLOSE)
-    async def disable_edit_mode(message: Message) -> None:
-        chat_id, thread_id = _scope_from_message(message)
-        _set_edit_mode(chat_id=chat_id, thread_id=thread_id, enabled=False)
-        await message.answer(
-            "✅ Режим редактирования выключен.",
-            reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
-        )
-
-    @router.message(F.text == BTN_ADD_TASK)
-    async def create_task_from_reply(message: Message) -> None:
-        chat_id, thread_id = _scope_from_message(message)
-        if not _is_edit_mode_enabled(chat_id=chat_id, thread_id=thread_id):
-            await message.answer(
-                f"Сначала нажмите {BTN_EDIT_TASK}, затем добавляйте задачу.",
-                reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
-            )
-            return
-        quoted = message.reply_to_message
-        quote_text = (quoted.text or quoted.caption or "").strip() if quoted else ""
-        if not quote_text:
-            await message.answer(
-                f"Ответьте на сообщение и снова нажмите {BTN_ADD_TASK}.",
-                reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
-            )
-            return
-
-        task = _manual_task_from_quote(message=message, quoted_text=quote_text)
-        await asyncio.to_thread(db.upsert_task, task, source="manual")
-
-        await _send_task_card(
-            bot=message.bot,
-            db=db,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            task=task,
-            task_index=1,
-            total=1,
-            include_keyboard=True,
-            allow_edit_actions=True,
-        )
-        await message.answer(
-            "Задача создана из цитаты. При необходимости ответьте на карточку задачи и исправьте поля.",
-            reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
         )
 
     @router.callback_query(F.data == "mode|dev")
@@ -275,151 +196,6 @@ def build_router(
         _set_dev_mode(chat_id=chat_id, thread_id=thread_id, enabled=False)
         await message.answer(
             "Обычный режим включен.",
-            reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
-        )
-
-    @router.callback_query(F.data.startswith("task_set|"))
-    async def callback_set_status(callback: CallbackQuery) -> None:
-        if callback.message is None:
-            await callback.answer()
-            return
-        parts = (callback.data or "").split("|")
-        if len(parts) != 3:
-            await callback.answer("Некорректные данные кнопки", show_alert=True)
-            return
-        _, external_id, status_code = parts
-        status = CODE_TO_STATUS.get(status_code)
-        if status is None:
-            await callback.answer("Неизвестный статус", show_alert=True)
-            return
-
-        chat_id = callback.message.chat.id
-        thread_id = callback.message.message_thread_id or 0
-        if not _is_edit_mode_enabled(chat_id=chat_id, thread_id=thread_id):
-            await callback.answer(
-                "Сначала включите режим редактирования.",
-                show_alert=True,
-            )
-            return
-
-        updated = await asyncio.to_thread(
-            db.update_task,
-            external_id=external_id,
-            status=status,
-        )
-        if updated is None:
-            await callback.answer("Задача не найдена", show_alert=True)
-            return
-
-        await _send_task_card(
-            bot=callback.message.bot,
-            db=db,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            task=updated,
-            task_index=1,
-            total=1,
-            old_message_id=callback.message.message_id,
-            include_keyboard=False,
-            allow_edit_actions=True,
-        )
-        await callback.answer("Статус обновлен")
-
-    @router.callback_query(F.data.startswith("task_fix|"))
-    async def callback_fix_hint(callback: CallbackQuery) -> None:
-        if callback.message is None:
-            await callback.answer()
-            return
-        chat_id = callback.message.chat.id
-        thread_id = callback.message.message_thread_id or 0
-        if not _is_edit_mode_enabled(chat_id=chat_id, thread_id=thread_id):
-            await callback.answer(
-                "Сначала включите режим редактирования.",
-                show_alert=True,
-            )
-            return
-        parts = (callback.data or "").split("|")
-        if len(parts) != 2:
-            await callback.answer("Некорректные данные кнопки", show_alert=True)
-            return
-        _, external_id = parts
-        await callback.message.answer(
-            f"Ответьте на карточку задачи `{external_id}` текстом:\n"
-            "название: ...\n"
-            "описание: ...\n"
-            "дедлайн: 2026-04-25\n"
-            "автор: ...\n"
-            "исполнитель: ...\n"
-            "статус: В работе",
-            reply_markup=_keyboard_for_scope(
-                chat_id=chat_id,
-                thread_id=thread_id,
-            ),
-        )
-        await callback.answer()
-
-    @router.message(F.reply_to_message)
-    async def manual_fix_on_reply(message: Message) -> None:
-        text = (message.text or message.caption or "").strip()
-        if not text:
-            return
-        if text.startswith("/") or text in _all_control_button_texts():
-            return
-
-        chat_id, thread_id = _scope_from_message(message)
-        if not _is_edit_mode_enabled(chat_id=chat_id, thread_id=thread_id):
-            await message.answer(
-                f"Сначала нажмите {BTN_EDIT_TASK}.",
-                reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
-            )
-            return
-        reply_id = message.reply_to_message.message_id
-        external_id = await asyncio.to_thread(
-            db.find_task_external_id_by_post_message,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            bot_message_id=reply_id,
-        )
-        if not external_id:
-            return
-        if external_id.startswith("__meta_"):
-            await message.answer(
-                "Для редактирования ответьте именно на карточку конкретной задачи.",
-                reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
-            )
-            return
-
-        updates = _parse_manual_updates(text)
-        if not updates:
-            await message.answer(
-                "Не понял поля для исправления. Пример:\n"
-                "статус: В работе\nисполнитель: @username\nдедлайн: 2026-04-25",
-                reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
-            )
-            return
-
-        updated = await asyncio.to_thread(db.update_task, external_id=external_id, **updates)
-        if updated is None:
-            await message.answer(
-                "Не удалось обновить задачу.",
-                reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
-            )
-            return
-
-        await _send_task_card(
-            bot=message.bot,
-            db=db,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            task=updated,
-            task_index=1,
-            total=1,
-            old_message_id=reply_id,
-            include_keyboard=True,
-            allow_edit_actions=True,
-        )
-        await message.answer(
-            "Исправления применены.",
             reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
         )
 
@@ -625,7 +401,6 @@ async def _send_report(
         return
 
     total = len(ordered_tasks)
-    allow_edit_actions = _is_edit_mode_enabled(chat_id=chat_id, thread_id=thread_id)
     for idx, task in enumerate(ordered_tasks, start=1):
         await _send_task_card(
             bot=bot,
@@ -636,7 +411,6 @@ async def _send_report(
             task_index=idx,
             total=total,
             include_keyboard=False,
-            allow_edit_actions=allow_edit_actions,
         )
 
 
@@ -651,7 +425,6 @@ async def _send_task_card(
     total: int,
     old_message_id: int | None = None,
     include_keyboard: bool,
-    allow_edit_actions: bool,
 ) -> None:
     previous_id = await asyncio.to_thread(
         db.get_task_post_message_id,
@@ -677,7 +450,7 @@ async def _send_task_card(
         chat_id=chat_id,
         thread_id=thread_id,
         text=_render_task_message_html(task_index=task_index, total=total, task=task),
-        inline_keyboard=_task_inline_keyboard(task.external_id) if allow_edit_actions else None,
+        inline_keyboard=None,
         include_keyboard=include_keyboard,
     )
     await asyncio.to_thread(
@@ -720,16 +493,12 @@ async def _safe_delete_message(*, bot: Bot, chat_id: int, message_id: int) -> No
 
 def _keyboard_for_scope(*, chat_id: int, thread_id: int) -> ReplyKeyboardMarkup:
     if _is_dev_mode_enabled(chat_id=chat_id, thread_id=thread_id):
-        edit_enabled = _is_edit_mode_enabled(chat_id=chat_id, thread_id=thread_id)
         rows = [
             [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_HELP)],
-            [KeyboardButton(text=BTN_EDIT_CLOSE if edit_enabled else BTN_EDIT_TASK)],
             [KeyboardButton(text=BTN_DEV_CLEAR_SCOPE), KeyboardButton(text=BTN_DEV_CLEAR_ALL)],
             [KeyboardButton(text=BTN_DEV_WHERE), KeyboardButton(text=BTN_DEV_SCHEDULE)],
             [KeyboardButton(text=BTN_DEV_BACK)],
         ]
-        if edit_enabled:
-            rows.insert(2, [KeyboardButton(text=BTN_ADD_TASK)])
         return ReplyKeyboardMarkup(
             keyboard=rows,
             resize_keyboard=True,
@@ -737,20 +506,9 @@ def _keyboard_for_scope(*, chat_id: int, thread_id: int) -> ReplyKeyboardMarkup:
             input_field_placeholder="Режим программиста...",
         )
 
-    if _is_edit_mode_enabled(chat_id=chat_id, thread_id=thread_id):
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_EDIT_CLOSE)],
-                [KeyboardButton(text=BTN_ADD_TASK), KeyboardButton(text=BTN_HELP)],
-            ],
-            resize_keyboard=True,
-            is_persistent=True,
-            input_field_placeholder="Редактирование включено...",
-        )
-
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_EDIT_TASK)],
+            [KeyboardButton(text=BTN_SUMMARY)],
             [KeyboardButton(text=BTN_HELP)],
         ],
         resize_keyboard=True,
@@ -771,18 +529,6 @@ def _scope_key(*, chat_id: int, thread_id: int) -> tuple[int, int]:
     return chat_id, thread_id
 
 
-def _is_edit_mode_enabled(*, chat_id: int, thread_id: int) -> bool:
-    return _scope_key(chat_id=chat_id, thread_id=thread_id) in EDIT_MODE_SCOPES
-
-
-def _set_edit_mode(*, chat_id: int, thread_id: int, enabled: bool) -> None:
-    key = _scope_key(chat_id=chat_id, thread_id=thread_id)
-    if enabled:
-        EDIT_MODE_SCOPES.add(key)
-        return
-    EDIT_MODE_SCOPES.discard(key)
-
-
 def _is_dev_mode_enabled(*, chat_id: int, thread_id: int) -> bool:
     return _scope_key(chat_id=chat_id, thread_id=thread_id) in DEV_MODE_SCOPES
 
@@ -799,10 +545,7 @@ def _all_control_button_texts() -> set[str]:
     # Keep legacy button labels to avoid saving old keyboard clicks into context.
     return {
         BTN_SUMMARY,
-        BTN_EDIT_TASK,
         BTN_HELP,
-        BTN_ADD_TASK,
-        BTN_EDIT_CLOSE,
         BTN_DEV_CLEAR_SCOPE,
         BTN_DEV_CLEAR_ALL,
         BTN_DEV_SCHEDULE,
@@ -816,43 +559,6 @@ def _all_control_button_texts() -> set[str]:
         "📍 Где я",
         "🔙 Выйти из режима программиста",
     }
-
-
-def _task_inline_keyboard(external_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🟡 В ожидании",
-                    callback_data=f"task_set|{external_id}|wait",
-                ),
-                InlineKeyboardButton(
-                    text="🔵 В работе",
-                    callback_data=f"task_set|{external_id}|work",
-                ),
-                InlineKeyboardButton(
-                    text="🟢 Завершена",
-                    callback_data=f"task_set|{external_id}|done",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="🔴 Отклонена",
-                    callback_data=f"task_set|{external_id}|reject",
-                ),
-                InlineKeyboardButton(
-                    text="⚪ Отозвана",
-                    callback_data=f"task_set|{external_id}|revoke",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✏️ Как исправить",
-                    callback_data=f"task_fix|{external_id}",
-                )
-            ],
-        ]
-    )
 
 
 def _render_summary_message_html(report: StatusReport) -> str:
@@ -917,73 +623,6 @@ def _trim_text(text: str, *, limit: int) -> str:
     return value[: limit - 1].rstrip() + "…"
 
 
-def _manual_task_from_quote(*, message: Message, quoted_text: str) -> TaskRecord:
-    first_line = next((line.strip() for line in quoted_text.splitlines() if line.strip()), "")
-    title = first_line[:100] if first_line else "Новая задача"
-    external_id = f"M{int(message.date.timestamp())}{message.message_id}"
-    return TaskRecord(
-        external_id=external_id,
-        title=title,
-        description=quoted_text,
-        deadline_date="",
-        author_name=_telegram_author(message),
-        assignee="Не назначен",
-        status="В ожидании",
-    )
-
-
-def _parse_manual_updates(raw: str) -> dict[str, str]:
-    updates: dict[str, str] = {}
-    for line in raw.splitlines():
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        clean_key = _normalize_alias(key)
-        clean_value = value.strip()
-        if not clean_value:
-            continue
-        if clean_key in {"название", "title"}:
-            updates["title"] = clean_value
-        elif clean_key in {"описание", "description"}:
-            updates["description"] = clean_value
-        elif clean_key in {"дедлайн", "deadline"}:
-            updates["deadline_date"] = _normalize_deadline_or_keep(clean_value)
-        elif clean_key in {"автор", "author"}:
-            updates["author_name"] = clean_value
-        elif clean_key in {"исполнитель", "assignee"}:
-            updates["assignee"] = clean_value
-        elif clean_key in {"статус", "status"}:
-            updates["status"] = _normalize_status(clean_value)
-    return updates
-
-
-def _normalize_status(raw_status: str) -> str:
-    value = " ".join(raw_status.strip().lower().replace("-", " ").split())
-    if value in {"в ожидании", "ожидание", "pending", "todo", "to do"}:
-        return "В ожидании"
-    if value in {"в работе", "работа", "in progress", "in_progress", "doing"}:
-        return "В работе"
-    if value in {"завершена", "завершено", "done", "completed", "готово"}:
-        return "Завершена"
-    if value in {"отклонена", "rejected", "declined", "cancelled by manager"}:
-        return "Отклонена"
-    if value in {"отозвана", "withdrawn", "canceled", "cancelled"}:
-        return "Отозвана"
-    return "В ожидании"
-
-
-def _normalize_deadline_or_keep(raw: str) -> str:
-    text = raw.strip()
-    if not text:
-        return ""
-    from datetime import date
-
-    try:
-        return date.fromisoformat(text).isoformat()
-    except ValueError:
-        return text
-
-
 def _status_icon(status: str) -> str:
     if status == "В ожидании":
         return "🟡"
@@ -1011,10 +650,6 @@ def _telegram_author(message: Message) -> str:
 
 def _scope_from_message(message: Message) -> tuple[int, int]:
     return message.chat.id, message.message_thread_id or 0
-
-
-def _normalize_alias(raw: str) -> str:
-    return " ".join(raw.strip().lower().split())
 
 
 def _humanize_llm_error(exc: Exception) -> str:
