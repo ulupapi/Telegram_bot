@@ -285,7 +285,6 @@ async def main() -> None:
     user_commands = [
         BotCommand(command="menu", description="Открыть клавиатуру"),
         BotCommand(command="summary", description="Показать сводку задач"),
-        BotCommand(command="add_task", description="Добавить задачу из ответа"),
         BotCommand(command="edit_task", description="Как редактировать задачу"),
         BotCommand(command="help", description="Подсказка по кнопкам"),
     ]

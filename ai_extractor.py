@@ -287,10 +287,13 @@ class AIExtractor:
                                 f"status={status}, body={body}"
                             ) from exc
                         if status == 402:
-                            raise RuntimeError(
-                                "Amvera payment required: "
-                                f"status=402, endpoint={attempt_endpoint}, model={attempt_model}, body={body}"
-                            ) from exc
+                            is_last_attempt = (attempt_endpoint, attempt_model) == attempts[-1]
+                            if is_last_attempt:
+                                raise RuntimeError(
+                                    "Amvera payment required: "
+                                    f"status=402, endpoint={attempt_endpoint}, model={attempt_model}, body={body}"
+                                ) from exc
+                            break
                         if status in {502, 504} and retry_idx == 0:
                             continue
                         break

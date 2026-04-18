@@ -23,9 +23,8 @@ from database import Database, TaskRecord
 logger = logging.getLogger(__name__)
 STATUS_ORDER = ["В ожидании", "В работе", "Завершена", "Отклонена", "Отозвана"]
 
-BTN_SUMMARY = "📊 Показать сводку"
-BTN_ADD_TASK = "➕ Добавить задачу"
-BTN_EDIT_TASK = "✏️ Редактировать задачу"
+BTN_SUMMARY = "📊 Получить общую сводку"
+BTN_EDIT_TASK = "✏️ Режим редактирования"
 BTN_HELP = "❓ Помощь"
 
 STATUS_TO_CODE = {
@@ -63,8 +62,9 @@ def build_router(
         await message.answer(
             "Пользовательские действия:\n"
             f"• {BTN_SUMMARY} — получить свежую сводку\n"
-            f"• {BTN_ADD_TASK} — ответьте на сообщение и нажмите кнопку\n"
             f"• {BTN_EDIT_TASK} — инструкция по ручному редактированию\n\n"
+            "Как добавить задачу вручную:\n"
+            "• Ответьте на исходное сообщение и отправьте: /add_task\n\n"
             "Как редактировать задачу:\n"
             "1. Ответьте на карточку задачи.\n"
             "2. Напишите изменения построчно, например:\n"
@@ -83,13 +83,12 @@ def build_router(
         )
 
     @router.message(Command("add_task", "add"))
-    @router.message(F.text == BTN_ADD_TASK)
     async def create_task_from_reply(message: Message) -> None:
         quoted = message.reply_to_message
         quote_text = (quoted.text or quoted.caption or "").strip() if quoted else ""
         if not quote_text:
             await message.answer(
-                "Ответьте на сообщение и снова нажмите «➕ Добавить задачу».",
+                "Ответьте на сообщение и отправьте команду /add_task.",
                 reply_markup=_main_keyboard(),
             )
             return
@@ -270,7 +269,6 @@ def build_router(
             return
         if text.startswith("/") or text in {
             BTN_SUMMARY,
-            BTN_ADD_TASK,
             BTN_EDIT_TASK,
             BTN_HELP,
         }:
@@ -285,6 +283,12 @@ def build_router(
             bot_message_id=reply_id,
         )
         if not external_id:
+            return
+        if external_id.startswith("__meta_"):
+            await message.answer(
+                "Для редактирования ответьте именно на карточку конкретной задачи.",
+                reply_markup=_main_keyboard(),
+            )
             return
 
         updates = _parse_manual_updates(text)
@@ -321,7 +325,7 @@ def build_router(
             return
         if text.startswith("/"):
             return
-        if text in {BTN_SUMMARY, BTN_ADD_TASK, BTN_EDIT_TASK, BTN_HELP}:
+        if text in {BTN_SUMMARY, BTN_EDIT_TASK, BTN_HELP}:
             return
         if message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.is_bot:
             return
@@ -361,9 +365,16 @@ async def send_status_for_scope(
     if not rows:
         return False
 
-    report = await asyncio.to_thread(extractor.extract_status, rows)
-    await asyncio.to_thread(db.replace_tasks, report.tasks)
-    tasks = await asyncio.to_thread(db.list_tasks)
+    try:
+        report = await asyncio.to_thread(extractor.extract_status, rows)
+        await asyncio.to_thread(db.replace_tasks, report.tasks)
+        tasks = await asyncio.to_thread(db.list_tasks)
+    except Exception as exc:
+        if _is_expected_llm_error(exc):
+            logger.warning("Scheduled summary skipped due to LLM issue: %s", exc)
+        else:
+            logger.exception("Scheduled summary failed")
+        return False
     merged = StatusReport(
         done=report.done,
         in_progress=report.in_progress,
@@ -414,7 +425,10 @@ async def _send_status_for_message(
         await asyncio.to_thread(db.replace_tasks, report.tasks)
         tasks = await asyncio.to_thread(db.list_tasks)
     except Exception as exc:
-        logger.exception("Failed to build status report")
+        if _is_expected_llm_error(exc):
+            logger.warning("Failed to build status report: %s", exc)
+        else:
+            logger.exception("Failed to build status report")
         await message.answer(_humanize_llm_error(exc), reply_markup=_main_keyboard())
         return
 
@@ -443,22 +457,53 @@ async def _send_report(
     report: StatusReport,
     include_keyboard: bool,
 ) -> None:
-    await _send_text(
+    old_message_ids = await asyncio.to_thread(
+        db.list_task_post_message_ids,
+        chat_id=chat_id,
+        thread_id=thread_id,
+    )
+    for old_message_id in old_message_ids:
+        await _safe_delete_message(
+            bot=bot,
+            chat_id=chat_id,
+            message_id=old_message_id,
+        )
+    await asyncio.to_thread(
+        db.clear_task_posts,
+        chat_id=chat_id,
+        thread_id=thread_id,
+    )
+
+    summary_message = await _send_text(
         bot=bot,
         chat_id=chat_id,
         thread_id=thread_id,
         text=_render_summary_message_html(report),
         include_keyboard=include_keyboard,
     )
+    await asyncio.to_thread(
+        db.set_task_post_message_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        external_id="__meta_summary__",
+        bot_message_id=summary_message.message_id,
+    )
 
     ordered_tasks = _ordered_tasks(report.tasks)
     if not ordered_tasks:
-        await _send_text(
+        empty_message = await _send_text(
             bot=bot,
             chat_id=chat_id,
             thread_id=thread_id,
             text="📋 <b>Реестр задач</b>\n• Задачи не найдены.",
             include_keyboard=False,
+        )
+        await asyncio.to_thread(
+            db.set_task_post_message_id,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            external_id="__meta_empty__",
+            bot_message_id=empty_message.message_id,
         )
         return
 
@@ -556,8 +601,8 @@ async def _safe_delete_message(*, bot: Bot, chat_id: int, message_id: int) -> No
 def _main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_ADD_TASK)],
-            [KeyboardButton(text=BTN_EDIT_TASK), KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_EDIT_TASK)],
+            [KeyboardButton(text=BTN_HELP)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие...",
@@ -797,3 +842,25 @@ def _humanize_llm_error(exc: Exception) -> str:
             "Проверьте AMVERA_LLM_MODEL и API-ключ (теперь детали есть в логах)."
         )
     return "Не удалось получить сводку от LLM. Попробуйте чуть позже."
+
+
+def _is_expected_llm_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in (
+            "insufficient_quota",
+            "resource_exhausted",
+            "quota exceeded",
+            "429",
+            "payment required",
+            "status=402",
+            "502",
+            "504",
+            "bad gateway",
+            "gateway time-out",
+            "read timeout",
+            "timed out",
+            "amvera request failed",
+        )
+    )

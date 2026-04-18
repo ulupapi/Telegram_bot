@@ -72,6 +72,18 @@ class _DatabaseBackend(Protocol):
         external_id: str,
         bot_message_id: int,
     ) -> None: ...
+    def list_task_post_message_ids(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+    ) -> list[int]: ...
+    def clear_task_posts(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+    ) -> int: ...
     def get_task_post_message_id(
         self,
         *,
@@ -382,6 +394,41 @@ class _SQLiteBackend:
                     """,
                     (chat_id, thread_id, external_id, bot_message_id),
                 )
+
+    def list_task_post_message_ids(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+    ) -> list[int]:
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT bot_message_id
+                FROM task_posts
+                WHERE chat_id = ? AND thread_id = ?
+                ORDER BY id ASC
+                """,
+                (chat_id, thread_id),
+            ).fetchall()
+        return [int(row["bot_message_id"]) for row in rows]
+
+    def clear_task_posts(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+    ) -> int:
+        with self._lock:
+            with self.conn:
+                cur = self.conn.execute(
+                    """
+                    DELETE FROM task_posts
+                    WHERE chat_id = ? AND thread_id = ?
+                    """,
+                    (chat_id, thread_id),
+                )
+                return max(0, cur.rowcount)
 
     def get_task_post_message_id(
         self,
@@ -839,6 +886,43 @@ class _PostgresBackend:
                     (chat_id, thread_id, external_id, bot_message_id),
                 )
 
+    def list_task_post_message_ids(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+    ) -> list[int]:
+        with self._lock:
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT bot_message_id
+                    FROM task_posts
+                    WHERE chat_id = %s AND thread_id = %s
+                    ORDER BY id ASC
+                    """,
+                    (chat_id, thread_id),
+                )
+                rows = cur.fetchall()
+        return [int(row["bot_message_id"]) for row in rows]
+
+    def clear_task_posts(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+    ) -> int:
+        with self._lock:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    DELETE FROM task_posts
+                    WHERE chat_id = %s AND thread_id = %s
+                    """,
+                    (chat_id, thread_id),
+                )
+                return max(0, cur.rowcount)
+
     def get_task_post_message_id(
         self,
         *,
@@ -1100,6 +1184,25 @@ class Database:
             external_id=external_id,
             bot_message_id=bot_message_id,
         )
+
+    def list_task_post_message_ids(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+    ) -> list[int]:
+        return self._backend.list_task_post_message_ids(
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+
+    def clear_task_posts(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+    ) -> int:
+        return self._backend.clear_task_posts(chat_id=chat_id, thread_id=thread_id)
 
     def get_task_post_message_id(
         self,
