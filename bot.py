@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramConflictError
 from aiogram.types import (
     BotCommand,
     BotCommandScopeAllGroupChats,
@@ -44,6 +45,7 @@ class Settings:
     summary_morning_time: str
     summary_evening_time: str
     schedule_timezone: str
+    polling_lock_id: int
 
 
 def load_settings() -> Settings:
@@ -97,6 +99,7 @@ def load_settings() -> Settings:
         summary_morning_time=os.getenv("SUMMARY_MORNING_TIME", "09:00").strip(),
         summary_evening_time=os.getenv("SUMMARY_EVENING_TIME", "18:00").strip(),
         schedule_timezone=os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow").strip(),
+        polling_lock_id=int(os.getenv("POLLING_LOCK_ID", "71482391")),
     )
 
 
@@ -215,6 +218,32 @@ async def _run_schedule_loop(
             logging.exception("Scheduled summary failed")
 
 
+def _try_acquire_polling_lock(
+    *,
+    db_backend: str,
+    postgres_dsn: str | None,
+    lock_id: int,
+):
+    if db_backend != "postgres" or not postgres_dsn:
+        return None
+    try:
+        import psycopg
+        from psycopg.rows import tuple_row
+    except Exception:
+        logging.warning("psycopg not available, polling lock is disabled")
+        return None
+
+    conn = psycopg.connect(postgres_dsn, autocommit=True)
+    with conn.cursor(row_factory=tuple_row) as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (lock_id,))
+        row = cur.fetchone()
+    got_lock = bool(row and row[0])
+    if not got_lock:
+        conn.close()
+        return False
+    return conn
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -267,6 +296,20 @@ async def main() -> None:
     await bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
 
     scheduler_task: asyncio.Task | None = None
+    polling_lock_conn = _try_acquire_polling_lock(
+        db_backend=settings.db_backend,
+        postgres_dsn=settings.postgres_dsn,
+        lock_id=settings.polling_lock_id,
+    )
+    if polling_lock_conn is False:
+        logging.warning(
+            "Another bot instance is already polling (lock_id=%s). Exiting this instance.",
+            settings.polling_lock_id,
+        )
+        db.close()
+        await bot.session.close()
+        return
+
     if settings.schedule_enabled:
         if settings.target_chat_id is None:
             logging.warning(
@@ -288,12 +331,21 @@ async def main() -> None:
             )
 
     try:
+        await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    except TelegramConflictError:
+        logging.warning("Polling conflict detected. Another instance is active; exiting.")
     finally:
         if scheduler_task:
             scheduler_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await scheduler_task
+        if polling_lock_conn not in (None, False):
+            with contextlib.suppress(Exception):
+                with polling_lock_conn.cursor() as cur:
+                    cur.execute("SELECT pg_advisory_unlock(%s)", (settings.polling_lock_id,))
+            with contextlib.suppress(Exception):
+                polling_lock_conn.close()
         db.close()
         await bot.session.close()
 
