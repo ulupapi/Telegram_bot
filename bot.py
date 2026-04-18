@@ -11,7 +11,6 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramConflictError
 from aiogram.types import (
-    BotCommand,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
     BotCommandScopeDefault,
@@ -282,25 +281,10 @@ async def main() -> None:
         )
     )
 
-    user_commands = [
-        BotCommand(command="menu", description="Открыть клавиатуру"),
-        BotCommand(command="summary", description="Показать сводку задач"),
-        BotCommand(command="edit_task", description="Как редактировать задачу"),
-        BotCommand(command="help", description="Подсказка по кнопкам"),
-    ]
-    dev_commands = [
-        BotCommand(command="dev_help", description="Dev: список служебных команд"),
-        BotCommand(command="dev_where", description="Dev: текущий chat_id/topic_id"),
-        BotCommand(command="dev_clear", description="Dev: очистить текущий контекст"),
-        BotCommand(command="dev_clear_all", description="Dev: очистить всю БД"),
-        BotCommand(command="dev_schedule", description="Dev: параметры расписания"),
-    ]
-    await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
-    await bot.set_my_commands(user_commands, scope=BotCommandScopeAllGroupChats())
-    await bot.set_my_commands(
-        user_commands + dev_commands,
-        scope=BotCommandScopeAllPrivateChats(),
-    )
+    # User experience is menu-first: clear slash command lists in all scopes.
+    await bot.set_my_commands([], scope=BotCommandScopeDefault())
+    await bot.set_my_commands([], scope=BotCommandScopeAllGroupChats())
+    await bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
 
     scheduler_task: asyncio.Task | None = None
     polling_lock_conn = _try_acquire_polling_lock(
