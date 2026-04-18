@@ -3,16 +3,40 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timezone
+from html import escape
 
-from aiogram import Router
+from aiogram import F, Bot, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 
 from ai_extractor import AIExtractor, StatusReport
-from database import Database
+from database import Database, TaskRecord
 
 logger = logging.getLogger(__name__)
 STATUS_ORDER = ["В ожидании", "В работе", "Завершена", "Отклонена", "Отозвана"]
+
+BTN_STATUS = "📊 Обновить сводку"
+BTN_CREATE_REPLY = "➕ Задача из ответа"
+BTN_CLEAR = "🧹 Очистить контекст"
+BTN_WHERE = "📍 Где я"
+BTN_HELP = "❓ Помощь"
+BTN_BIND = "🔗 Привязать контекст"
+
+STATUS_TO_CODE = {
+    "В ожидании": "wait",
+    "В работе": "work",
+    "Завершена": "done",
+    "Отклонена": "reject",
+    "Отозвана": "revoke",
+}
+CODE_TO_STATUS = {value: key for key, value in STATUS_TO_CODE.items()}
 
 
 def build_router(
@@ -24,6 +48,29 @@ def build_router(
     extractor: AIExtractor,
 ) -> Router:
     router = Router()
+
+    @router.message(Command("start", "menu"))
+    async def cmd_start(message: Message) -> None:
+        await message.answer(
+            "Управление ботом через кнопки внизу.\n"
+            "Выберите действие на клавиатуре.",
+            reply_markup=_main_keyboard(),
+        )
+
+    @router.message(Command("help"))
+    @router.message(F.text == BTN_HELP)
+    async def help_action(message: Message) -> None:
+        await message.answer(
+            "Доступные действия:\n"
+            f"• {BTN_STATUS} — собрать сводку и обновить карточки задач\n"
+            f"• {BTN_CREATE_REPLY} — ответьте на сообщение и нажмите кнопку\n"
+            f"• {BTN_CLEAR} — очистить контекст и задачи\n"
+            f"• {BTN_WHERE} — показать chat_id/topic_id\n"
+            f"• {BTN_BIND} — сохранить имя текущего контекста\n\n"
+            "Ручная правка задачи: ответьте на карточку задачи сообщением вида:\n"
+            "статус: В работе\nисполнитель: @username\nдедлайн: 2026-04-25",
+            reply_markup=_main_keyboard(),
+        )
 
     @router.message(Command("bind"))
     async def cmd_bind(message: Message) -> None:
@@ -41,73 +88,61 @@ def build_router(
             thread_id=thread_id,
         )
         suffix = f", topic_id={thread_id}" if thread_id else ""
-        await message.answer(f"Сохранил цель «{alias_raw}»: chat_id={chat_id}{suffix}")
+        await message.answer(
+            f"Сохранил цель «{alias_raw}»: chat_id={chat_id}{suffix}",
+            reply_markup=_main_keyboard(),
+        )
+
+    @router.message(F.text == BTN_BIND)
+    async def bind_current_context(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        alias = _extract_topic_name(message) if thread_id else (message.chat.title or "").strip()
+        if not alias:
+            alias = "текущий_контекст"
+        normalized = _normalize_alias(alias)
+        await asyncio.to_thread(
+            db.set_manual_scope_alias,
+            alias=normalized,
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+        suffix = f", topic_id={thread_id}" if thread_id else ""
+        await message.answer(
+            f"Контекст привязан как «{alias}»: chat_id={chat_id}{suffix}",
+            reply_markup=_main_keyboard(),
+        )
 
     @router.message(Command("where"))
-    async def cmd_where(message: Message) -> None:
+    @router.message(F.text == BTN_WHERE)
+    async def where_action(message: Message) -> None:
         chat_id, thread_id = _scope_from_message(message)
         if thread_id:
             await message.answer(
-                f"Текущий контекст: chat_id={chat_id}, topic_id={thread_id}\n"
-                "Можно сохранить имя: /bind Задания"
+                f"Текущий контекст: chat_id={chat_id}, topic_id={thread_id}",
+                reply_markup=_main_keyboard(),
             )
         else:
             await message.answer(
-                f"Текущий контекст: chat_id={chat_id} (обычный чат)\n"
-                "Можно сохранить имя: /bind Задания"
+                f"Текущий контекст: chat_id={chat_id} (обычный чат)",
+                reply_markup=_main_keyboard(),
             )
 
-    @router.message(Command("help"))
-    async def cmd_help(message: Message) -> None:
-        await message.answer(
-            "Команды бота:\n"
-            "• /status [название] — сводка и задачи (каждая задача отдельным сообщением)\n"
-            "• /bind <название> — привязать алиас к текущему чату/ветке\n"
-            "• /where — показать текущий chat_id/topic_id\n"
-            "• /clear_db [название] — очистить данные текущего/указанного контекста\n"
-            "• /clear_db all — очистить всю БД\n"
-            "• /clear [название] — короткий алиас для /clear_db"
-        )
-
     @router.message(Command("status"))
-    async def cmd_status(message: Message) -> None:
-        scope = await _resolve_scope_from_message_or_alias(
+    @router.message(F.text == BTN_STATUS)
+    async def status_action(message: Message) -> None:
+        await _send_status_for_message(
             message=message,
             db=db,
+            extractor=extractor,
             target_chat_id=target_chat_id,
             target_topic_id=target_topic_id,
+            context_messages_limit=context_messages_limit,
             alias_raw=_command_argument(message),
         )
-        if scope is None:
-            return
-        scope_chat_id, scope_thread_id = scope
 
-        rows = await asyncio.to_thread(
-            db.get_recent_thread_messages,
-            chat_id=scope_chat_id,
-            thread_id=scope_thread_id,
-            limit=context_messages_limit,
-        )
-        if not rows:
-            if scope_thread_id:
-                await message.answer("Пока нет сообщений для анализа в этой ветке.")
-            else:
-                await message.answer("Пока нет сообщений для анализа в этом чате.")
-            return
-
-        try:
-            report = await asyncio.to_thread(extractor.extract_status, rows)
-            await asyncio.to_thread(db.replace_tasks, report.tasks)
-        except Exception as exc:
-            logger.exception("Failed to build status report")
-            await message.answer(_humanize_llm_error(exc))
-            return
-
-        for chunk in _render_status_messages(report):
-            await message.answer(chunk)
-
-    @router.message(Command(commands=["clear_db", "clear"]))
-    async def cmd_clear_db(message: Message) -> None:
+    @router.message(Command("clear_db", "clear"))
+    @router.message(F.text == BTN_CLEAR)
+    async def clear_action(message: Message) -> None:
         arg_raw = _command_argument(message)
         arg_clean = _normalize_alias(arg_raw) if arg_raw else ""
         if arg_clean in {"all", "все"}:
@@ -118,7 +153,8 @@ def build_router(
                 "🧹 База очищена полностью.\n"
                 f"• Сообщений удалено: {deleted_messages}\n"
                 f"• Задач удалено: {deleted_tasks}\n"
-                f"• Привязок удалено: {deleted_aliases}"
+                f"• Привязок удалено: {deleted_aliases}",
+                reply_markup=_main_keyboard(),
             )
             return
 
@@ -143,9 +179,153 @@ def build_router(
             "🧹 Контекст очищен.\n"
             f"• Сообщений удалено: {deleted_messages}\n"
             f"• Задач удалено: {deleted_tasks}\n"
-            f"• Контекст: chat_id={scope_chat_id}{scope_suffix}\n"
-            "Чтобы очистить все данные сразу, используйте: /clear_db all"
+            f"• Контекст: chat_id={scope_chat_id}{scope_suffix}",
+            reply_markup=_main_keyboard(),
         )
+
+    @router.message(F.text == BTN_CREATE_REPLY)
+    async def create_task_from_reply(message: Message) -> None:
+        quoted = message.reply_to_message
+        quote_text = (quoted.text or quoted.caption or "").strip() if quoted else ""
+        if not quote_text:
+            await message.answer(
+                "Ответьте на сообщение и снова нажмите «➕ Задача из ответа».",
+                reply_markup=_main_keyboard(),
+            )
+            return
+
+        task = _manual_task_from_quote(message=message, quoted_text=quote_text)
+        await asyncio.to_thread(db.upsert_task, task, source="manual")
+
+        chat_id, thread_id = _scope_from_message(message)
+        await _send_task_card(
+            bot=message.bot,
+            db=db,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            task=task,
+            task_index=1,
+            total=1,
+            include_keyboard=True,
+        )
+        await message.answer(
+            "Задача создана из цитаты. При необходимости ответьте на карточку задачи и исправьте поля.",
+            reply_markup=_main_keyboard(),
+        )
+
+    @router.callback_query(F.data.startswith("task_set|"))
+    async def callback_set_status(callback: CallbackQuery) -> None:
+        if callback.message is None:
+            await callback.answer()
+            return
+        parts = (callback.data or "").split("|")
+        if len(parts) != 3:
+            await callback.answer("Некорректные данные кнопки", show_alert=True)
+            return
+        _, external_id, status_code = parts
+        status = CODE_TO_STATUS.get(status_code)
+        if status is None:
+            await callback.answer("Неизвестный статус", show_alert=True)
+            return
+
+        updated = await asyncio.to_thread(
+            db.update_task,
+            external_id=external_id,
+            status=status,
+        )
+        if updated is None:
+            await callback.answer("Задача не найдена", show_alert=True)
+            return
+
+        chat_id = callback.message.chat.id
+        thread_id = callback.message.message_thread_id or 0
+        await _send_task_card(
+            bot=callback.message.bot,
+            db=db,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            task=updated,
+            task_index=1,
+            total=1,
+            old_message_id=callback.message.message_id,
+            include_keyboard=False,
+        )
+        await callback.answer("Статус обновлен")
+
+    @router.callback_query(F.data.startswith("task_fix|"))
+    async def callback_fix_hint(callback: CallbackQuery) -> None:
+        if callback.message is None:
+            await callback.answer()
+            return
+        parts = (callback.data or "").split("|")
+        if len(parts) != 2:
+            await callback.answer("Некорректные данные кнопки", show_alert=True)
+            return
+        _, external_id = parts
+        await callback.message.answer(
+            f"Ответьте на карточку задачи `{external_id}` текстом:\n"
+            "название: ...\n"
+            "описание: ...\n"
+            "дедлайн: 2026-04-25\n"
+            "автор: ...\n"
+            "исполнитель: ...\n"
+            "статус: В работе",
+            reply_markup=_main_keyboard(),
+        )
+        await callback.answer()
+
+    @router.message(F.reply_to_message)
+    async def manual_fix_on_reply(message: Message) -> None:
+        text = (message.text or message.caption or "").strip()
+        if not text:
+            return
+        if text.startswith("/") or text in {
+            BTN_STATUS,
+            BTN_CREATE_REPLY,
+            BTN_CLEAR,
+            BTN_WHERE,
+            BTN_HELP,
+            BTN_BIND,
+        }:
+            return
+
+        chat_id, thread_id = _scope_from_message(message)
+        reply_id = message.reply_to_message.message_id
+        external_id = await asyncio.to_thread(
+            db.find_task_external_id_by_post_message,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            bot_message_id=reply_id,
+        )
+        if not external_id:
+            return
+
+        updates = _parse_manual_updates(text)
+        if not updates:
+            await message.answer(
+                "Не понял поля для исправления. Пример:\n"
+                "статус: В работе\nисполнитель: @username\nдедлайн: 2026-04-25",
+                reply_markup=_main_keyboard(),
+            )
+            return
+
+        updated = await asyncio.to_thread(db.update_task, external_id=external_id, **updates)
+        if updated is None:
+            await message.answer("Не удалось обновить задачу.", reply_markup=_main_keyboard())
+            return
+
+        await _send_task_card(
+            bot=message.bot,
+            db=db,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            task=updated,
+            task_index=1,
+            total=1,
+            old_message_id=reply_id,
+            include_keyboard=True,
+        )
+        await message.answer("Исправления применены.", reply_markup=_main_keyboard())
 
     @router.message()
     async def collect_messages(message: Message) -> None:
@@ -153,6 +333,10 @@ def build_router(
         if not text:
             return
         if text.startswith("/"):
+            return
+        if text in {BTN_STATUS, BTN_CREATE_REPLY, BTN_CLEAR, BTN_WHERE, BTN_HELP, BTN_BIND}:
+            return
+        if message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.is_bot:
             return
 
         chat_id, thread_id = _scope_from_message(message)
@@ -186,102 +370,330 @@ def build_router(
     return router
 
 
-def _render_status(report: StatusReport) -> str:
-    lines = ["📌 Сводка по ветке"]
-    lines.extend(
-        _render_section(
-            "✅ Что сделано",
-            report.done,
-            "Новых завершенных задач нет.",
-        )
+async def send_status_for_scope(
+    *,
+    bot: Bot,
+    db: Database,
+    extractor: AIExtractor,
+    chat_id: int,
+    thread_id: int,
+    context_messages_limit: int,
+) -> bool:
+    rows = await asyncio.to_thread(
+        db.get_recent_thread_messages,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        limit=context_messages_limit,
     )
-    lines.extend(
-        _render_section(
-            "🛠 Что в работе",
-            report.in_progress,
-            "Активных задач не найдено.",
-        )
+    if not rows:
+        return False
+
+    report = await asyncio.to_thread(extractor.extract_status, rows)
+    await asyncio.to_thread(db.replace_tasks, report.tasks)
+    tasks = await asyncio.to_thread(db.list_tasks)
+    merged = StatusReport(
+        done=report.done,
+        in_progress=report.in_progress,
+        blocked=report.blocked,
+        tasks=tasks,
     )
-    lines.extend(
-        _render_section(
-            "⛔ Что зависло",
-            report.blocked,
-            "Блокеров не найдено.",
-        )
+    await _send_report(
+        bot=bot,
+        db=db,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        report=merged,
+        include_keyboard=False,
     )
-    lines.extend(_render_task_registry(report))
-    return "\n".join(lines)
+    return True
 
 
-def _render_status_messages(report: StatusReport) -> list[str]:
-    messages = [_render_summary_message(report)]
-    if not report.tasks:
-        messages.append("📋 Реестр задач\n• Задачи не найдены.")
-        return messages
+async def _send_status_for_message(
+    *,
+    message: Message,
+    db: Database,
+    extractor: AIExtractor,
+    target_chat_id: int | None,
+    target_topic_id: int | None,
+    context_messages_limit: int,
+    alias_raw: str,
+) -> None:
+    scope = await _resolve_scope_from_message_or_alias(
+        message=message,
+        db=db,
+        target_chat_id=target_chat_id,
+        target_topic_id=target_topic_id,
+        alias_raw=alias_raw,
+    )
+    if scope is None:
+        return
+    scope_chat_id, scope_thread_id = scope
 
-    ordered_tasks = _ordered_tasks(report)
+    rows = await asyncio.to_thread(
+        db.get_recent_thread_messages,
+        chat_id=scope_chat_id,
+        thread_id=scope_thread_id,
+        limit=context_messages_limit,
+    )
+    if not rows:
+        if scope_thread_id:
+            await message.answer(
+                "Пока нет сообщений для анализа в этой ветке.",
+                reply_markup=_main_keyboard(),
+            )
+        else:
+            await message.answer(
+                "Пока нет сообщений для анализа в этом чате.",
+                reply_markup=_main_keyboard(),
+            )
+        return
+
+    try:
+        report = await asyncio.to_thread(extractor.extract_status, rows)
+        await asyncio.to_thread(db.replace_tasks, report.tasks)
+        tasks = await asyncio.to_thread(db.list_tasks)
+    except Exception as exc:
+        logger.exception("Failed to build status report")
+        await message.answer(_humanize_llm_error(exc), reply_markup=_main_keyboard())
+        return
+
+    merged = StatusReport(
+        done=report.done,
+        in_progress=report.in_progress,
+        blocked=report.blocked,
+        tasks=tasks,
+    )
+    await _send_report(
+        bot=message.bot,
+        db=db,
+        chat_id=scope_chat_id,
+        thread_id=scope_thread_id,
+        report=merged,
+        include_keyboard=True,
+    )
+
+
+async def _send_report(
+    *,
+    bot: Bot,
+    db: Database,
+    chat_id: int,
+    thread_id: int,
+    report: StatusReport,
+    include_keyboard: bool,
+) -> None:
+    await _send_text(
+        bot=bot,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        text=_render_summary_message_html(report),
+        include_keyboard=include_keyboard,
+    )
+
+    ordered_tasks = _ordered_tasks(report.tasks)
+    if not ordered_tasks:
+        await _send_text(
+            bot=bot,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            text="📋 <b>Реестр задач</b>\n• Задачи не найдены.",
+            include_keyboard=False,
+        )
+        return
+
+    total = len(ordered_tasks)
     for idx, task in enumerate(ordered_tasks, start=1):
-        messages.append(_render_task_message(task_index=idx, total=len(ordered_tasks), task=task))
-    return messages
+        await _send_task_card(
+            bot=bot,
+            db=db,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            task=task,
+            task_index=idx,
+            total=total,
+            include_keyboard=False,
+        )
 
 
-def _render_summary_message(report: StatusReport) -> str:
-    lines = ["📌 Сводка по ветке"]
-    lines.extend(
-        _render_section(
-            "✅ Что сделано",
-            report.done,
-            "Новых завершенных задач нет.",
-        )
+async def _send_task_card(
+    *,
+    bot: Bot,
+    db: Database,
+    chat_id: int,
+    thread_id: int,
+    task: TaskRecord,
+    task_index: int,
+    total: int,
+    old_message_id: int | None = None,
+    include_keyboard: bool,
+) -> None:
+    previous_id = await asyncio.to_thread(
+        db.get_task_post_message_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        external_id=task.external_id,
     )
-    lines.extend(
-        _render_section(
-            "🛠 Что в работе",
-            report.in_progress,
-            "Активных задач не найдено.",
+    if previous_id and previous_id != old_message_id:
+        await _safe_delete_message(
+            bot=bot,
+            chat_id=chat_id,
+            message_id=previous_id,
         )
-    )
-    lines.extend(
-        _render_section(
-            "⛔ Что зависло",
-            report.blocked,
-            "Блокеров не найдено.",
+    if old_message_id:
+        await _safe_delete_message(
+            bot=bot,
+            chat_id=chat_id,
+            message_id=old_message_id,
         )
+
+    sent = await _send_text(
+        bot=bot,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        text=_render_task_message_html(task_index=task_index, total=total, task=task),
+        inline_keyboard=_task_inline_keyboard(task.external_id),
+        include_keyboard=include_keyboard,
     )
-    lines.append("\n📋 Статусы задач:")
+    await asyncio.to_thread(
+        db.set_task_post_message_id,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        external_id=task.external_id,
+        bot_message_id=sent.message_id,
+    )
+
+
+async def _send_text(
+    *,
+    bot: Bot,
+    chat_id: int,
+    thread_id: int,
+    text: str,
+    inline_keyboard: InlineKeyboardMarkup | None = None,
+    include_keyboard: bool,
+) -> Message:
+    reply_markup = inline_keyboard
+    if include_keyboard and reply_markup is None:
+        reply_markup = _main_keyboard()
+    return await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        message_thread_id=thread_id or None,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=reply_markup,
+    )
+
+
+async def _safe_delete_message(*, bot: Bot, chat_id: int, message_id: int) -> None:
+    try:
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        logger.debug("Failed to delete old task message chat_id=%s message_id=%s", chat_id, message_id)
+
+
+def _main_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_CREATE_REPLY)],
+            [KeyboardButton(text=BTN_CLEAR), KeyboardButton(text=BTN_WHERE)],
+            [KeyboardButton(text=BTN_BIND), KeyboardButton(text=BTN_HELP)],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие...",
+    )
+
+
+def _task_inline_keyboard(external_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🟡 В ожидании",
+                    callback_data=f"task_set|{external_id}|wait",
+                ),
+                InlineKeyboardButton(
+                    text="🔵 В работе",
+                    callback_data=f"task_set|{external_id}|work",
+                ),
+                InlineKeyboardButton(
+                    text="🟢 Завершена",
+                    callback_data=f"task_set|{external_id}|done",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔴 Отклонена",
+                    callback_data=f"task_set|{external_id}|reject",
+                ),
+                InlineKeyboardButton(
+                    text="⚪ Отозвана",
+                    callback_data=f"task_set|{external_id}|revoke",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✏️ Как исправить",
+                    callback_data=f"task_fix|{external_id}",
+                )
+            ],
+        ]
+    )
+
+
+def _render_summary_message_html(report: StatusReport) -> str:
+    lines = ["📌 <b>Сводка по ветке</b>"]
+    lines.extend(_render_section_html("✅ Что сделано", report.done, "Новых завершенных задач нет."))
+    lines.extend(_render_section_html("🛠 Что в работе", report.in_progress, "Активных задач не найдено."))
+    lines.extend(_render_section_html("⛔ Что зависло", report.blocked, "Блокеров не найдено."))
+    lines.append("\n📋 <b>Статусы задач:</b>")
     if not report.tasks:
         lines.append("• Задач нет.")
     else:
         for status in STATUS_ORDER:
             count = sum(1 for task in report.tasks if task.status == status)
             if count:
-                lines.append(f"• {_status_icon(status)} {status}: {count}")
+                lines.append(f"• {_status_icon(status)} {escape(status)}: {count}")
     return "\n".join(lines)
 
 
-def _ordered_tasks(report: StatusReport):
-    ordered = []
+def _render_task_message_html(*, task_index: int, total: int, task: TaskRecord) -> str:
+    title = escape(task.title)
+    author = escape(task.author_name)
+    assignee = escape(task.assignee)
+    status = escape(task.status)
+    external_id = escape(task.external_id)
+    deadline = escape(task.deadline_date or "—")
+    description = escape(_trim_text(task.description, limit=900) or "Не указано")
+    return (
+        f"🧩 <b>Задача {task_index} из {total}</b>\n"
+        f"📅 <b>Дедлайн:</b> {deadline}\n"
+        f"🌐 <b>Основная информация:</b>\n\n"
+        f"1. <b>Название:</b> {title}\n"
+        f"2. <b>Автор:</b> {author}\n"
+        f"3. <b>Исполнитель:</b> {assignee}\n"
+        f"4. <b>Статус:</b> {_status_icon(task.status)} {status}\n"
+        f"5. <b>ID:</b> {external_id}\n"
+        "6. <b>Описание:</b>\n"
+        f"<blockquote>{description}</blockquote>"
+    )
+
+
+def _render_section_html(title: str, items: list[str], empty_text: str) -> list[str]:
+    lines = [f"\n<b>{escape(title)}</b>"]
+    if not items:
+        lines.append(f"• {escape(empty_text)}")
+        return lines
+    for idx, item in enumerate(items, start=1):
+        lines.append(f"{idx}. {escape(item)}")
+    return lines
+
+
+def _ordered_tasks(tasks: list[TaskRecord]) -> list[TaskRecord]:
+    ordered: list[TaskRecord] = []
     for status in STATUS_ORDER:
-        status_tasks = [task for task in report.tasks if task.status == status]
-        ordered.extend(status_tasks)
+        ordered.extend([task for task in tasks if task.status == status])
     return ordered
-
-
-def _render_task_message(*, task_index: int, total: int, task) -> str:
-    description = _trim_text(task.description, limit=900) or "Не указано"
-    lines = [
-        f"🧩 Задача {task_index} из {total}",
-        f"📅 Дедлайн: {task.deadline_date or '—'}",
-        "🌐 Основная информация:",
-        f"1. Название: {task.title}",
-        f"2. Автор: {task.author_name}",
-        f"3. Исполнитель: {task.assignee}",
-        f"4. Статус: {_status_icon(task.status)} {task.status}",
-        f"5. ID: {task.external_id}",
-        "6. Описание:",
-        f"«{description}»",
-    ]
-    return "\n".join(lines)
 
 
 def _trim_text(text: str, *, limit: int) -> str:
@@ -291,39 +703,71 @@ def _trim_text(text: str, *, limit: int) -> str:
     return value[: limit - 1].rstrip() + "…"
 
 
-def _render_section(title: str, items: list[str], empty_text: str) -> list[str]:
-    lines = [f"\n{title}"]
-    if not items:
-        lines.append(f"• {empty_text}")
-        return lines
+def _manual_task_from_quote(*, message: Message, quoted_text: str) -> TaskRecord:
+    first_line = next((line.strip() for line in quoted_text.splitlines() if line.strip()), "")
+    title = first_line[:100] if first_line else "Новая задача"
+    external_id = f"M{int(message.date.timestamp())}{message.message_id}"
+    return TaskRecord(
+        external_id=external_id,
+        title=title,
+        description=quoted_text,
+        deadline_date="",
+        author_name=_telegram_author(message),
+        assignee="Не назначен",
+        status="В ожидании",
+    )
 
-    for idx, item in enumerate(items, start=1):
-        lines.append(f"{idx}. {item}")
-    return lines
 
-
-def _render_task_registry(report: StatusReport) -> list[str]:
-    lines = ["\n📋 Реестр задач"]
-    if not report.tasks:
-        lines.append("• Задачи не найдены.")
-        return lines
-
-    for status in STATUS_ORDER:
-        status_tasks = [task for task in report.tasks if task.status == status]
-        if not status_tasks:
+def _parse_manual_updates(raw: str) -> dict[str, str]:
+    updates: dict[str, str] = {}
+    for line in raw.splitlines():
+        if ":" not in line:
             continue
-        lines.append(f"\n{_status_icon(status)} {status} ({len(status_tasks)})")
-        for idx, task in enumerate(status_tasks, start=1):
-            lines.append(f"{idx}. {task.title}")
-            lines.append(f"   🆔 {task.external_id}")
-            lines.append(f"   📅 Дедлайн: {task.deadline_date or '—'}")
-            lines.append(f"   👤 Автор: {task.author_name}")
-            lines.append(f"   👷 Исполнитель: {task.assignee}")
-            lines.append(f"   🏷 Статус: {task.status}")
-            if task.description:
-                lines.append("   📝 Описание:")
-                lines.append(f"   └ {task.description}")
-    return lines
+        key, value = line.split(":", 1)
+        clean_key = _normalize_alias(key)
+        clean_value = value.strip()
+        if not clean_value:
+            continue
+        if clean_key in {"название", "title"}:
+            updates["title"] = clean_value
+        elif clean_key in {"описание", "description"}:
+            updates["description"] = clean_value
+        elif clean_key in {"дедлайн", "deadline"}:
+            updates["deadline_date"] = _normalize_deadline_or_keep(clean_value)
+        elif clean_key in {"автор", "author"}:
+            updates["author_name"] = clean_value
+        elif clean_key in {"исполнитель", "assignee"}:
+            updates["assignee"] = clean_value
+        elif clean_key in {"статус", "status"}:
+            updates["status"] = _normalize_status(clean_value)
+    return updates
+
+
+def _normalize_status(raw_status: str) -> str:
+    value = " ".join(raw_status.strip().lower().replace("-", " ").split())
+    if value in {"в ожидании", "ожидание", "pending", "todo", "to do"}:
+        return "В ожидании"
+    if value in {"в работе", "работа", "in progress", "in_progress", "doing"}:
+        return "В работе"
+    if value in {"завершена", "завершено", "done", "completed", "готово"}:
+        return "Завершена"
+    if value in {"отклонена", "rejected", "declined", "cancelled by manager"}:
+        return "Отклонена"
+    if value in {"отозвана", "withdrawn", "canceled", "cancelled"}:
+        return "Отозвана"
+    return "В ожидании"
+
+
+def _normalize_deadline_or_keep(raw: str) -> str:
+    text = raw.strip()
+    if not text:
+        return ""
+    from datetime import date
+
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        return text
 
 
 def _status_icon(status: str) -> str:
@@ -433,7 +877,8 @@ async def _resolve_scope_from_message_or_alias(
         if not resolved:
             await message.answer(
                 f"Не нашел цель «{alias_raw}». "
-                f"Откройте нужный чат/ветку и выполните: /bind {alias_raw}"
+                f"Откройте нужный чат/ветку и выполните: /bind {alias_raw}",
+                reply_markup=_main_keyboard(),
             )
             return None
         return resolved

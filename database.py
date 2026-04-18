@@ -61,6 +61,31 @@ class _DatabaseBackend(Protocol):
         limit: int,
     ) -> list[StoredMessage]: ...
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None: ...
+    def upsert_task(self, task: TaskRecord, *, source: str) -> None: ...
+    def list_tasks(self) -> list[TaskRecord]: ...
+    def get_task(self, *, external_id: str) -> TaskRecord | None: ...
+    def set_task_post_message_id(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+        bot_message_id: int,
+    ) -> None: ...
+    def get_task_post_message_id(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+    ) -> int | None: ...
+    def find_task_external_id_by_post_message(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        bot_message_id: int,
+    ) -> str | None: ...
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]: ...
     def clear_all(self) -> tuple[int, int, int]: ...
     def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None: ...
@@ -112,6 +137,7 @@ class _SQLiteBackend:
                         author_name TEXT NOT NULL DEFAULT '',
                         assignee TEXT NOT NULL DEFAULT '',
                         status TEXT NOT NULL,
+                        source TEXT NOT NULL DEFAULT 'llm',
                         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                     """
@@ -120,6 +146,7 @@ class _SQLiteBackend:
                 self._ensure_column("tasks", "deadline_date", "TEXT NOT NULL DEFAULT ''")
                 self._ensure_column("tasks", "author_name", "TEXT NOT NULL DEFAULT ''")
                 self._ensure_column("tasks", "assignee", "TEXT NOT NULL DEFAULT ''")
+                self._ensure_column("tasks", "source", "TEXT NOT NULL DEFAULT 'llm'")
                 self.conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS scope_aliases (
@@ -128,6 +155,20 @@ class _SQLiteBackend:
                         thread_id INTEGER NOT NULL,
                         is_manual INTEGER NOT NULL DEFAULT 0,
                         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                self.conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS task_posts (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        chat_id INTEGER NOT NULL,
+                        thread_id INTEGER NOT NULL,
+                        external_id TEXT NOT NULL,
+                        bot_message_id INTEGER NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(chat_id, thread_id, external_id),
+                        UNIQUE(chat_id, thread_id, bot_message_id)
                     )
                     """
                 )
@@ -196,7 +237,9 @@ class _SQLiteBackend:
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None:
         with self._lock:
             with self.conn:
-                self.conn.execute("DELETE FROM tasks")
+                self.conn.execute(
+                    "DELETE FROM tasks WHERE source = 'llm' OR source IS NULL"
+                )
                 for task in tasks:
                     if task.status not in VALID_STATUSES:
                         continue
@@ -209,9 +252,10 @@ class _SQLiteBackend:
                             deadline_date,
                             author_name,
                             assignee,
-                            status
+                            status,
+                            source
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'llm')
                         """,
                         (
                             task.external_id,
@@ -223,6 +267,161 @@ class _SQLiteBackend:
                             task.status,
                         ),
                     )
+
+    def upsert_task(self, task: TaskRecord, *, source: str) -> None:
+        if task.status not in VALID_STATUSES:
+            return
+        clean_source = "manual" if source.strip().lower() == "manual" else "llm"
+        with self._lock:
+            with self.conn:
+                self.conn.execute(
+                    """
+                    INSERT INTO tasks (
+                        external_id,
+                        title,
+                        description,
+                        deadline_date,
+                        author_name,
+                        assignee,
+                        status,
+                        source
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(external_id) DO UPDATE SET
+                        title = excluded.title,
+                        description = excluded.description,
+                        deadline_date = excluded.deadline_date,
+                        author_name = excluded.author_name,
+                        assignee = excluded.assignee,
+                        status = excluded.status,
+                        source = excluded.source,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        task.external_id,
+                        task.title,
+                        task.description,
+                        task.deadline_date,
+                        task.author_name,
+                        task.assignee,
+                        task.status,
+                        clean_source,
+                    ),
+                )
+
+    def list_tasks(self) -> list[TaskRecord]:
+        status_sort = (
+            "CASE status "
+            "WHEN 'В ожидании' THEN 1 "
+            "WHEN 'В работе' THEN 2 "
+            "WHEN 'Завершена' THEN 3 "
+            "WHEN 'Отклонена' THEN 4 "
+            "WHEN 'Отозвана' THEN 5 "
+            "ELSE 99 END"
+        )
+        with self._lock:
+            rows = self.conn.execute(
+                f"""
+                SELECT external_id, title, description, deadline_date, author_name, assignee, status
+                FROM tasks
+                ORDER BY {status_sort}, updated_at DESC, id DESC
+                """
+            ).fetchall()
+        return [
+            TaskRecord(
+                external_id=row["external_id"],
+                title=row["title"],
+                description=row["description"],
+                deadline_date=row["deadline_date"],
+                author_name=row["author_name"],
+                assignee=row["assignee"],
+                status=row["status"],
+            )
+            for row in rows
+        ]
+
+    def get_task(self, *, external_id: str) -> TaskRecord | None:
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT external_id, title, description, deadline_date, author_name, assignee, status
+                FROM tasks
+                WHERE external_id = ?
+                """,
+                (external_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return TaskRecord(
+            external_id=row["external_id"],
+            title=row["title"],
+            description=row["description"],
+            deadline_date=row["deadline_date"],
+            author_name=row["author_name"],
+            assignee=row["assignee"],
+            status=row["status"],
+        )
+
+    def set_task_post_message_id(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+        bot_message_id: int,
+    ) -> None:
+        with self._lock:
+            with self.conn:
+                self.conn.execute(
+                    """
+                    INSERT INTO task_posts (chat_id, thread_id, external_id, bot_message_id)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(chat_id, thread_id, external_id) DO UPDATE SET
+                        bot_message_id = excluded.bot_message_id,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (chat_id, thread_id, external_id, bot_message_id),
+                )
+
+    def get_task_post_message_id(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+    ) -> int | None:
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT bot_message_id
+                FROM task_posts
+                WHERE chat_id = ? AND thread_id = ? AND external_id = ?
+                """,
+                (chat_id, thread_id, external_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return int(row["bot_message_id"])
+
+    def find_task_external_id_by_post_message(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        bot_message_id: int,
+    ) -> str | None:
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT external_id
+                FROM task_posts
+                WHERE chat_id = ? AND thread_id = ? AND bot_message_id = ?
+                """,
+                (chat_id, thread_id, bot_message_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["external_id"])
 
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
         with self._lock:
@@ -237,6 +436,13 @@ class _SQLiteBackend:
                 deleted_messages = max(0, cur_messages.rowcount)
                 cur_tasks = self.conn.execute("DELETE FROM tasks")
                 deleted_tasks = max(0, cur_tasks.rowcount)
+                self.conn.execute(
+                    """
+                    DELETE FROM task_posts
+                    WHERE chat_id = ? AND thread_id = ?
+                    """,
+                    (chat_id, thread_id),
+                )
         return deleted_messages, deleted_tasks
 
     def clear_all(self) -> tuple[int, int, int]:
@@ -248,6 +454,7 @@ class _SQLiteBackend:
                 deleted_tasks = max(0, cur_tasks.rowcount)
                 cur_aliases = self.conn.execute("DELETE FROM scope_aliases")
                 deleted_aliases = max(0, cur_aliases.rowcount)
+                self.conn.execute("DELETE FROM task_posts")
         return deleted_messages, deleted_tasks, deleted_aliases
 
     def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None:
@@ -361,6 +568,7 @@ class _PostgresBackend:
                         author_name TEXT NOT NULL DEFAULT '',
                         assignee TEXT NOT NULL DEFAULT '',
                         status TEXT NOT NULL,
+                        source TEXT NOT NULL DEFAULT 'llm',
                         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                     """
@@ -391,12 +599,32 @@ class _PostgresBackend:
                 )
                 cur.execute(
                     """
+                    ALTER TABLE tasks
+                    ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'llm'
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS scope_aliases (
                         alias TEXT PRIMARY KEY,
                         chat_id BIGINT NOT NULL,
                         thread_id BIGINT NOT NULL,
                         is_manual BOOLEAN NOT NULL DEFAULT FALSE,
                         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS task_posts (
+                        id BIGSERIAL PRIMARY KEY,
+                        chat_id BIGINT NOT NULL,
+                        thread_id BIGINT NOT NULL,
+                        external_id TEXT NOT NULL,
+                        bot_message_id BIGINT NOT NULL,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(chat_id, thread_id, external_id),
+                        UNIQUE(chat_id, thread_id, bot_message_id)
                     )
                     """
                 )
@@ -461,7 +689,9 @@ class _PostgresBackend:
         with self._lock:
             with self.conn.transaction():
                 with self.conn.cursor() as cur:
-                    cur.execute("DELETE FROM tasks")
+                    cur.execute(
+                        "DELETE FROM tasks WHERE source = 'llm' OR source IS NULL"
+                    )
                     for task in tasks:
                         if task.status not in VALID_STATUSES:
                             continue
@@ -474,9 +704,10 @@ class _PostgresBackend:
                                 deadline_date,
                                 author_name,
                                 assignee,
-                                status
+                                status,
+                                source
                             )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, 'llm')
                             """,
                             (
                                 task.external_id,
@@ -488,6 +719,169 @@ class _PostgresBackend:
                                 task.status,
                             ),
                         )
+
+    def upsert_task(self, task: TaskRecord, *, source: str) -> None:
+        if task.status not in VALID_STATUSES:
+            return
+        clean_source = "manual" if source.strip().lower() == "manual" else "llm"
+        with self._lock:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO tasks (
+                        external_id,
+                        title,
+                        description,
+                        deadline_date,
+                        author_name,
+                        assignee,
+                        status,
+                        source
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (external_id) DO UPDATE SET
+                        title = EXCLUDED.title,
+                        description = EXCLUDED.description,
+                        deadline_date = EXCLUDED.deadline_date,
+                        author_name = EXCLUDED.author_name,
+                        assignee = EXCLUDED.assignee,
+                        status = EXCLUDED.status,
+                        source = EXCLUDED.source,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (
+                        task.external_id,
+                        task.title,
+                        task.description,
+                        task.deadline_date,
+                        task.author_name,
+                        task.assignee,
+                        task.status,
+                        clean_source,
+                    ),
+                )
+
+    def list_tasks(self) -> list[TaskRecord]:
+        status_sort = (
+            "CASE status "
+            "WHEN 'В ожидании' THEN 1 "
+            "WHEN 'В работе' THEN 2 "
+            "WHEN 'Завершена' THEN 3 "
+            "WHEN 'Отклонена' THEN 4 "
+            "WHEN 'Отозвана' THEN 5 "
+            "ELSE 99 END"
+        )
+        with self._lock:
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    f"""
+                    SELECT external_id, title, description, deadline_date, author_name, assignee, status
+                    FROM tasks
+                    ORDER BY {status_sort}, updated_at DESC, id DESC
+                    """
+                )
+                rows = cur.fetchall()
+        return [
+            TaskRecord(
+                external_id=row["external_id"],
+                title=row["title"],
+                description=row["description"],
+                deadline_date=row["deadline_date"],
+                author_name=row["author_name"],
+                assignee=row["assignee"],
+                status=row["status"],
+            )
+            for row in rows
+        ]
+
+    def get_task(self, *, external_id: str) -> TaskRecord | None:
+        with self._lock:
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT external_id, title, description, deadline_date, author_name, assignee, status
+                    FROM tasks
+                    WHERE external_id = %s
+                    """,
+                    (external_id,),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return TaskRecord(
+            external_id=row["external_id"],
+            title=row["title"],
+            description=row["description"],
+            deadline_date=row["deadline_date"],
+            author_name=row["author_name"],
+            assignee=row["assignee"],
+            status=row["status"],
+        )
+
+    def set_task_post_message_id(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+        bot_message_id: int,
+    ) -> None:
+        with self._lock:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO task_posts (chat_id, thread_id, external_id, bot_message_id)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (chat_id, thread_id, external_id) DO UPDATE SET
+                        bot_message_id = EXCLUDED.bot_message_id,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (chat_id, thread_id, external_id, bot_message_id),
+                )
+
+    def get_task_post_message_id(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+    ) -> int | None:
+        with self._lock:
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT bot_message_id
+                    FROM task_posts
+                    WHERE chat_id = %s AND thread_id = %s AND external_id = %s
+                    """,
+                    (chat_id, thread_id, external_id),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return int(row["bot_message_id"])
+
+    def find_task_external_id_by_post_message(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        bot_message_id: int,
+    ) -> str | None:
+        with self._lock:
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT external_id
+                    FROM task_posts
+                    WHERE chat_id = %s AND thread_id = %s AND bot_message_id = %s
+                    """,
+                    (chat_id, thread_id, bot_message_id),
+                )
+                row = cur.fetchone()
+        if row is None:
+            return None
+        return str(row["external_id"])
 
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
         with self._lock:
@@ -503,6 +897,13 @@ class _PostgresBackend:
                     deleted_messages = max(0, cur.rowcount)
                     cur.execute("DELETE FROM tasks")
                     deleted_tasks = max(0, cur.rowcount)
+                    cur.execute(
+                        """
+                        DELETE FROM task_posts
+                        WHERE chat_id = %s AND thread_id = %s
+                        """,
+                        (chat_id, thread_id),
+                    )
         return deleted_messages, deleted_tasks
 
     def clear_all(self) -> tuple[int, int, int]:
@@ -515,6 +916,7 @@ class _PostgresBackend:
                     deleted_tasks = max(0, cur.rowcount)
                     cur.execute("DELETE FROM scope_aliases")
                     deleted_aliases = max(0, cur.rowcount)
+                    cur.execute("DELETE FROM task_posts")
         return deleted_messages, deleted_tasks, deleted_aliases
 
     def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None:
@@ -648,6 +1050,82 @@ class Database:
 
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None:
         self._backend.replace_tasks(tasks)
+
+    def upsert_task(self, task: TaskRecord, *, source: str = "manual") -> None:
+        self._backend.upsert_task(task, source=source)
+
+    def list_tasks(self) -> list[TaskRecord]:
+        return self._backend.list_tasks()
+
+    def get_task(self, *, external_id: str) -> TaskRecord | None:
+        return self._backend.get_task(external_id=external_id)
+
+    def update_task(
+        self,
+        *,
+        external_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        deadline_date: str | None = None,
+        author_name: str | None = None,
+        assignee: str | None = None,
+        status: str | None = None,
+    ) -> TaskRecord | None:
+        existing = self._backend.get_task(external_id=external_id)
+        if existing is None:
+            return None
+        updated = TaskRecord(
+            external_id=existing.external_id,
+            title=title if title is not None else existing.title,
+            description=description if description is not None else existing.description,
+            deadline_date=deadline_date if deadline_date is not None else existing.deadline_date,
+            author_name=author_name if author_name is not None else existing.author_name,
+            assignee=assignee if assignee is not None else existing.assignee,
+            status=status if status is not None else existing.status,
+        )
+        self._backend.upsert_task(updated, source="manual")
+        return updated
+
+    def set_task_post_message_id(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+        bot_message_id: int,
+    ) -> None:
+        self._backend.set_task_post_message_id(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            external_id=external_id,
+            bot_message_id=bot_message_id,
+        )
+
+    def get_task_post_message_id(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+    ) -> int | None:
+        return self._backend.get_task_post_message_id(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            external_id=external_id,
+        )
+
+    def find_task_external_id_by_post_message(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        bot_message_id: int,
+    ) -> str | None:
+        return self._backend.find_task_external_id_by_post_message(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            bot_message_id=bot_message_id,
+        )
 
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
         return self._backend.clear_scope(chat_id=chat_id, thread_id=thread_id)

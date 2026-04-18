@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import (
@@ -16,7 +19,7 @@ from dotenv import load_dotenv
 
 from ai_extractor import AIExtractor
 from database import Database
-from handlers import build_router
+from handlers import build_router, send_status_for_scope
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,10 @@ class Settings:
     sqlite_path: str
     context_messages_limit: int
     llm_timeout_seconds: int
+    schedule_enabled: bool
+    summary_morning_time: str
+    summary_evening_time: str
+    schedule_timezone: str
 
 
 def load_settings() -> Settings:
@@ -86,6 +93,10 @@ def load_settings() -> Settings:
         sqlite_path=os.getenv("SQLITE_PATH", "data/bot.db"),
         context_messages_limit=int(os.getenv("CONTEXT_MESSAGES_LIMIT", "120")),
         llm_timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
+        schedule_enabled=parse_bool(os.getenv("SCHEDULE_ENABLED", "1")),
+        summary_morning_time=os.getenv("SUMMARY_MORNING_TIME", "09:00").strip(),
+        summary_evening_time=os.getenv("SUMMARY_EVENING_TIME", "18:00").strip(),
+        schedule_timezone=os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow").strip(),
     )
 
 
@@ -109,6 +120,99 @@ def parse_optional_str(name: str) -> str | None:
         return None
     value = raw.strip()
     return value or None
+
+
+def parse_bool(raw: str | None) -> bool:
+    value = (raw or "").strip().lower()
+    return value in {"1", "true", "yes", "on", "y"}
+
+
+def _parse_hhmm(raw: str) -> tuple[int, int]:
+    parts = raw.split(":")
+    if len(parts) != 2:
+        raise ValueError(f"Time must be HH:MM, got {raw!r}")
+    hour = int(parts[0])
+    minute = int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"Time must be HH:MM, got {raw!r}")
+    return hour, minute
+
+
+def _next_run_time(
+    *,
+    now: datetime,
+    morning: tuple[int, int],
+    evening: tuple[int, int],
+) -> datetime:
+    candidates = []
+    for hour, minute in (morning, evening):
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        candidates.append(candidate)
+    return min(candidates)
+
+
+async def _run_schedule_loop(
+    *,
+    bot: Bot,
+    db: Database,
+    extractor: AIExtractor,
+    chat_id: int,
+    thread_id: int,
+    context_messages_limit: int,
+    morning_time: str,
+    evening_time: str,
+    timezone_name: str,
+) -> None:
+    try:
+        tz = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        logging.warning("Unknown SCHEDULE_TIMEZONE=%s, fallback to UTC", timezone_name)
+        tz = ZoneInfo("UTC")
+
+    try:
+        morning = _parse_hhmm(morning_time)
+    except ValueError:
+        logging.warning("Invalid SUMMARY_MORNING_TIME=%s, fallback to 09:00", morning_time)
+        morning = (9, 0)
+    try:
+        evening = _parse_hhmm(evening_time)
+    except ValueError:
+        logging.warning("Invalid SUMMARY_EVENING_TIME=%s, fallback to 18:00", evening_time)
+        evening = (18, 0)
+    logging.info(
+        "Task summary scheduler enabled: morning=%s evening=%s tz=%s chat_id=%s topic_id=%s",
+        morning_time,
+        evening_time,
+        timezone_name,
+        chat_id,
+        thread_id,
+    )
+
+    while True:
+        now = datetime.now(tz)
+        run_at = _next_run_time(now=now, morning=morning, evening=evening)
+        sleep_seconds = max(1.0, (run_at - now).total_seconds())
+        await asyncio.sleep(sleep_seconds)
+
+        try:
+            sent = await send_status_for_scope(
+                bot=bot,
+                db=db,
+                extractor=extractor,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                context_messages_limit=context_messages_limit,
+            )
+            if not sent:
+                logging.info(
+                    "Scheduler skipped summary: no messages in scope chat_id=%s topic_id=%s",
+                    chat_id,
+                    thread_id,
+                )
+        except Exception:
+            logging.exception("Scheduled summary failed")
 
 
 async def main() -> None:
@@ -150,6 +254,7 @@ async def main() -> None:
     )
 
     commands = [
+        BotCommand(command="menu", description="Открыть клавиатуру управления"),
         BotCommand(command="status", description="Сводка: сделано / в работе / зависло"),
         BotCommand(command="bind", description="Привязать имя к текущему чату/ветке"),
         BotCommand(command="where", description="Показать текущий chat_id/topic_id"),
@@ -161,9 +266,34 @@ async def main() -> None:
     await bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
     await bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
 
+    scheduler_task: asyncio.Task | None = None
+    if settings.schedule_enabled:
+        if settings.target_chat_id is None:
+            logging.warning(
+                "SCHEDULE_ENABLED=1 but TARGET_CHAT_ID is not set. Scheduler is disabled."
+            )
+        else:
+            scheduler_task = asyncio.create_task(
+                _run_schedule_loop(
+                    bot=bot,
+                    db=db,
+                    extractor=extractor,
+                    chat_id=settings.target_chat_id,
+                    thread_id=settings.target_topic_id or 0,
+                    context_messages_limit=settings.context_messages_limit,
+                    morning_time=settings.summary_morning_time,
+                    evening_time=settings.summary_evening_time,
+                    timezone_name=settings.schedule_timezone,
+                )
+            )
+
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        if scheduler_task:
+            scheduler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await scheduler_task
         db.close()
         await bot.session.close()
 
