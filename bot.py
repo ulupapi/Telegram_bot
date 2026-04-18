@@ -282,18 +282,26 @@ async def main() -> None:
         )
     )
 
-    commands = [
-        BotCommand(command="menu", description="Открыть клавиатуру управления"),
-        BotCommand(command="status", description="Сводка: сделано / в работе / зависло"),
-        BotCommand(command="bind", description="Привязать имя к текущему чату/ветке"),
-        BotCommand(command="where", description="Показать текущий chat_id/topic_id"),
-        BotCommand(command="clear_db", description="Очистить БД: /clear_db или /clear_db all"),
-        BotCommand(command="clear", description="Быстрая очистка: /clear или /clear all"),
-        BotCommand(command="help", description="Показать список команд"),
+    user_commands = [
+        BotCommand(command="menu", description="Открыть клавиатуру"),
+        BotCommand(command="summary", description="Показать сводку задач"),
+        BotCommand(command="add_task", description="Добавить задачу из ответа"),
+        BotCommand(command="edit_task", description="Как редактировать задачу"),
+        BotCommand(command="help", description="Подсказка по кнопкам"),
     ]
-    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
-    await bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
-    await bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
+    dev_commands = [
+        BotCommand(command="dev_help", description="Dev: список служебных команд"),
+        BotCommand(command="dev_where", description="Dev: текущий chat_id/topic_id"),
+        BotCommand(command="dev_clear", description="Dev: очистить текущий контекст"),
+        BotCommand(command="dev_clear_all", description="Dev: очистить всю БД"),
+        BotCommand(command="dev_schedule", description="Dev: параметры расписания"),
+    ]
+    await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+    await bot.set_my_commands(user_commands, scope=BotCommandScopeAllGroupChats())
+    await bot.set_my_commands(
+        user_commands + dev_commands,
+        scope=BotCommandScopeAllPrivateChats(),
+    )
 
     scheduler_task: asyncio.Task | None = None
     polling_lock_conn = _try_acquire_polling_lock(

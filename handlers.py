@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import timezone
 from html import escape
 
@@ -22,12 +23,10 @@ from database import Database, TaskRecord
 logger = logging.getLogger(__name__)
 STATUS_ORDER = ["В ожидании", "В работе", "Завершена", "Отклонена", "Отозвана"]
 
-BTN_STATUS = "📊 Обновить сводку"
-BTN_CREATE_REPLY = "➕ Задача из ответа"
-BTN_CLEAR = "🧹 Очистить контекст"
-BTN_WHERE = "📍 Где я"
+BTN_SUMMARY = "📊 Показать сводку"
+BTN_ADD_TASK = "➕ Добавить задачу"
+BTN_EDIT_TASK = "✏️ Редактировать задачу"
 BTN_HELP = "❓ Помощь"
-BTN_BIND = "🔗 Привязать контекст"
 
 STATUS_TO_CODE = {
     "В ожидании": "wait",
@@ -47,6 +46,7 @@ def build_router(
     db: Database,
     extractor: AIExtractor,
 ) -> Router:
+    _ = (target_chat_id, target_topic_id)
     router = Router()
 
     @router.message(Command("start", "menu"))
@@ -61,135 +61,35 @@ def build_router(
     @router.message(F.text == BTN_HELP)
     async def help_action(message: Message) -> None:
         await message.answer(
-            "Доступные действия:\n"
-            f"• {BTN_STATUS} — собрать сводку и обновить карточки задач\n"
-            f"• {BTN_CREATE_REPLY} — ответьте на сообщение и нажмите кнопку\n"
-            f"• {BTN_CLEAR} — очистить контекст и задачи\n"
-            f"• {BTN_WHERE} — показать chat_id/topic_id\n"
-            f"• {BTN_BIND} — сохранить имя текущего контекста\n\n"
-            "Ручная правка задачи: ответьте на карточку задачи сообщением вида:\n"
+            "Пользовательские действия:\n"
+            f"• {BTN_SUMMARY} — получить свежую сводку\n"
+            f"• {BTN_ADD_TASK} — ответьте на сообщение и нажмите кнопку\n"
+            f"• {BTN_EDIT_TASK} — инструкция по ручному редактированию\n\n"
+            "Как редактировать задачу:\n"
+            "1. Ответьте на карточку задачи.\n"
+            "2. Напишите изменения построчно, например:\n"
             "статус: В работе\nисполнитель: @username\nдедлайн: 2026-04-25",
             reply_markup=_main_keyboard(),
         )
 
-    @router.message(Command("bind"))
-    async def cmd_bind(message: Message) -> None:
-        alias_raw = _command_argument(message)
-        if not alias_raw:
-            await message.answer("Использование: /bind <название>, например: /bind Задания")
-            return
-
-        chat_id, thread_id = _scope_from_message(message)
-        alias = _normalize_alias(alias_raw)
-        await asyncio.to_thread(
-            db.set_manual_scope_alias,
-            alias=alias,
-            chat_id=chat_id,
-            thread_id=thread_id,
-        )
-        suffix = f", topic_id={thread_id}" if thread_id else ""
-        await message.answer(
-            f"Сохранил цель «{alias_raw}»: chat_id={chat_id}{suffix}",
-            reply_markup=_main_keyboard(),
-        )
-
-    @router.message(F.text == BTN_BIND)
-    async def bind_current_context(message: Message) -> None:
-        chat_id, thread_id = _scope_from_message(message)
-        alias = _extract_topic_name(message) if thread_id else (message.chat.title or "").strip()
-        if not alias:
-            alias = "текущий_контекст"
-        normalized = _normalize_alias(alias)
-        await asyncio.to_thread(
-            db.set_manual_scope_alias,
-            alias=normalized,
-            chat_id=chat_id,
-            thread_id=thread_id,
-        )
-        suffix = f", topic_id={thread_id}" if thread_id else ""
-        await message.answer(
-            f"Контекст привязан как «{alias}»: chat_id={chat_id}{suffix}",
-            reply_markup=_main_keyboard(),
-        )
-
-    @router.message(Command("where"))
-    @router.message(F.text == BTN_WHERE)
-    async def where_action(message: Message) -> None:
-        chat_id, thread_id = _scope_from_message(message)
-        if thread_id:
-            await message.answer(
-                f"Текущий контекст: chat_id={chat_id}, topic_id={thread_id}",
-                reply_markup=_main_keyboard(),
-            )
-        else:
-            await message.answer(
-                f"Текущий контекст: chat_id={chat_id} (обычный чат)",
-                reply_markup=_main_keyboard(),
-            )
-
-    @router.message(Command("status"))
-    @router.message(F.text == BTN_STATUS)
+    @router.message(Command("summary", "status"))
+    @router.message(F.text == BTN_SUMMARY)
     async def status_action(message: Message) -> None:
         await _send_status_for_message(
             message=message,
             db=db,
             extractor=extractor,
-            target_chat_id=target_chat_id,
-            target_topic_id=target_topic_id,
             context_messages_limit=context_messages_limit,
-            alias_raw=_command_argument(message),
         )
 
-    @router.message(Command("clear_db", "clear"))
-    @router.message(F.text == BTN_CLEAR)
-    async def clear_action(message: Message) -> None:
-        arg_raw = _command_argument(message)
-        arg_clean = _normalize_alias(arg_raw) if arg_raw else ""
-        if arg_clean in {"all", "все"}:
-            deleted_messages, deleted_tasks, deleted_aliases = await asyncio.to_thread(
-                db.clear_all
-            )
-            await message.answer(
-                "🧹 База очищена полностью.\n"
-                f"• Сообщений удалено: {deleted_messages}\n"
-                f"• Задач удалено: {deleted_tasks}\n"
-                f"• Привязок удалено: {deleted_aliases}",
-                reply_markup=_main_keyboard(),
-            )
-            return
-
-        scope = await _resolve_scope_from_message_or_alias(
-            message=message,
-            db=db,
-            target_chat_id=target_chat_id,
-            target_topic_id=target_topic_id,
-            alias_raw=arg_raw,
-        )
-        if scope is None:
-            return
-        scope_chat_id, scope_thread_id = scope
-
-        deleted_messages, deleted_tasks = await asyncio.to_thread(
-            db.clear_scope,
-            chat_id=scope_chat_id,
-            thread_id=scope_thread_id,
-        )
-        scope_suffix = f", topic_id={scope_thread_id}" if scope_thread_id else ""
-        await message.answer(
-            "🧹 Контекст очищен.\n"
-            f"• Сообщений удалено: {deleted_messages}\n"
-            f"• Задач удалено: {deleted_tasks}\n"
-            f"• Контекст: chat_id={scope_chat_id}{scope_suffix}",
-            reply_markup=_main_keyboard(),
-        )
-
-    @router.message(F.text == BTN_CREATE_REPLY)
+    @router.message(Command("add_task", "add"))
+    @router.message(F.text == BTN_ADD_TASK)
     async def create_task_from_reply(message: Message) -> None:
         quoted = message.reply_to_message
         quote_text = (quoted.text or quoted.caption or "").strip() if quoted else ""
         if not quote_text:
             await message.answer(
-                "Ответьте на сообщение и снова нажмите «➕ Задача из ответа».",
+                "Ответьте на сообщение и снова нажмите «➕ Добавить задачу».",
                 reply_markup=_main_keyboard(),
             )
             return
@@ -210,6 +110,95 @@ def build_router(
         )
         await message.answer(
             "Задача создана из цитаты. При необходимости ответьте на карточку задачи и исправьте поля.",
+            reply_markup=_main_keyboard(),
+        )
+
+    @router.message(Command("edit_task", "edit"))
+    @router.message(F.text == BTN_EDIT_TASK)
+    async def edit_task_help(message: Message) -> None:
+        await message.answer(
+            "Чтобы отредактировать задачу:\n"
+            "1. Ответьте на карточку задачи.\n"
+            "2. Напишите поля, которые хотите изменить.\n\n"
+            "Пример:\n"
+            "статус: В работе\n"
+            "исполнитель: @username\n"
+            "дедлайн: 2026-04-25\n"
+            "описание: Обновленное описание",
+            reply_markup=_main_keyboard(),
+        )
+
+    @router.message(Command("dev_help"))
+    async def dev_help(message: Message) -> None:
+        await message.answer(
+            "Dev-команды:\n"
+            "• /dev_where — текущий chat_id/topic_id\n"
+            "• /dev_clear — очистить текущий контекст\n"
+            "• /dev_clear_all — очистить всю БД\n"
+            "• /dev_schedule — показать параметры расписания",
+            reply_markup=_main_keyboard(),
+        )
+
+    @router.message(Command("dev_where"))
+    async def dev_where(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        if thread_id:
+            await message.answer(
+                f"Dev context: chat_id={chat_id}, topic_id={thread_id}",
+                reply_markup=_main_keyboard(),
+            )
+        else:
+            await message.answer(
+                f"Dev context: chat_id={chat_id}, topic_id=0",
+                reply_markup=_main_keyboard(),
+            )
+
+    @router.message(Command("dev_clear"))
+    async def dev_clear(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        deleted_messages, deleted_tasks = await asyncio.to_thread(
+            db.clear_scope,
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+        suffix = f", topic_id={thread_id}" if thread_id else ""
+        await message.answer(
+            "🧹 Dev clear выполнен.\n"
+            f"• Сообщений удалено: {deleted_messages}\n"
+            f"• Задач удалено: {deleted_tasks}\n"
+            f"• Контекст: chat_id={chat_id}{suffix}",
+            reply_markup=_main_keyboard(),
+        )
+
+    @router.message(Command("dev_clear_all"))
+    async def dev_clear_all(message: Message) -> None:
+        deleted_messages, deleted_tasks, deleted_aliases = await asyncio.to_thread(
+            db.clear_all
+        )
+        await message.answer(
+            "🧹 Dev clear all выполнен.\n"
+            f"• Сообщений удалено: {deleted_messages}\n"
+            f"• Задач удалено: {deleted_tasks}\n"
+            f"• Привязок удалено: {deleted_aliases}",
+            reply_markup=_main_keyboard(),
+        )
+
+    @router.message(Command("dev_schedule"))
+    async def dev_schedule(message: Message) -> None:
+        schedule_enabled = os.getenv("SCHEDULE_ENABLED", "1")
+        morning = os.getenv("SUMMARY_MORNING_TIME", "09:00")
+        evening = os.getenv("SUMMARY_EVENING_TIME", "18:00")
+        schedule_tz = os.getenv("SCHEDULE_TIMEZONE", "Europe/Moscow")
+        target_chat = os.getenv("TARGET_CHAT_ID", "")
+        target_topic = os.getenv("TARGET_TOPIC_ID", "")
+        await message.answer(
+            "Параметры расписания:\n"
+            f"• SCHEDULE_ENABLED={schedule_enabled}\n"
+            f"• SUMMARY_MORNING_TIME={morning}\n"
+            f"• SUMMARY_EVENING_TIME={evening}\n"
+            f"• SCHEDULE_TIMEZONE={schedule_tz}\n"
+            f"• TARGET_CHAT_ID={target_chat or '(пусто)'}\n"
+            f"• TARGET_TOPIC_ID={target_topic or '(пусто)'}",
             reply_markup=_main_keyboard(),
         )
 
@@ -280,12 +269,10 @@ def build_router(
         if not text:
             return
         if text.startswith("/") or text in {
-            BTN_STATUS,
-            BTN_CREATE_REPLY,
-            BTN_CLEAR,
-            BTN_WHERE,
+            BTN_SUMMARY,
+            BTN_ADD_TASK,
+            BTN_EDIT_TASK,
             BTN_HELP,
-            BTN_BIND,
         }:
             return
 
@@ -334,20 +321,12 @@ def build_router(
             return
         if text.startswith("/"):
             return
-        if text in {BTN_STATUS, BTN_CREATE_REPLY, BTN_CLEAR, BTN_WHERE, BTN_HELP, BTN_BIND}:
+        if text in {BTN_SUMMARY, BTN_ADD_TASK, BTN_EDIT_TASK, BTN_HELP}:
             return
         if message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.is_bot:
             return
 
         chat_id, thread_id = _scope_from_message(message)
-        if not _is_scope_allowed(
-            chat_id=chat_id,
-            thread_id=thread_id,
-            target_chat_id=target_chat_id,
-            target_topic_id=target_topic_id,
-        ):
-            return
-
         author = _telegram_author(message)
         created_at = message.date.replace(tzinfo=timezone.utc).isoformat()
 
@@ -359,12 +338,6 @@ def build_router(
             user_name=author,
             text=text,
             created_at=created_at,
-        )
-        await _learn_auto_aliases(
-            db=db,
-            message=message,
-            chat_id=chat_id,
-            thread_id=thread_id,
         )
 
     return router
@@ -413,21 +386,9 @@ async def _send_status_for_message(
     message: Message,
     db: Database,
     extractor: AIExtractor,
-    target_chat_id: int | None,
-    target_topic_id: int | None,
     context_messages_limit: int,
-    alias_raw: str,
 ) -> None:
-    scope = await _resolve_scope_from_message_or_alias(
-        message=message,
-        db=db,
-        target_chat_id=target_chat_id,
-        target_topic_id=target_topic_id,
-        alias_raw=alias_raw,
-    )
-    if scope is None:
-        return
-    scope_chat_id, scope_thread_id = scope
+    scope_chat_id, scope_thread_id = _scope_from_message(message)
 
     rows = await asyncio.to_thread(
         db.get_recent_thread_messages,
@@ -595,9 +556,8 @@ async def _safe_delete_message(*, bot: Bot, chat_id: int, message_id: int) -> No
 def _main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_CREATE_REPLY)],
-            [KeyboardButton(text=BTN_CLEAR), KeyboardButton(text=BTN_WHERE)],
-            [KeyboardButton(text=BTN_BIND), KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_ADD_TASK)],
+            [KeyboardButton(text=BTN_EDIT_TASK), KeyboardButton(text=BTN_HELP)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие...",
@@ -799,103 +759,8 @@ def _scope_from_message(message: Message) -> tuple[int, int]:
     return message.chat.id, message.message_thread_id or 0
 
 
-def _is_scope_allowed(
-    *,
-    chat_id: int,
-    thread_id: int,
-    target_chat_id: int | None,
-    target_topic_id: int | None,
-) -> bool:
-    if target_chat_id is None:
-        return True
-    if chat_id != target_chat_id:
-        return False
-    if target_topic_id is None:
-        return True
-    return thread_id == target_topic_id
-
-
-def _command_argument(message: Message) -> str:
-    text = (message.text or "").strip()
-    parts = text.split(maxsplit=1)
-    if len(parts) < 2:
-        return ""
-    return parts[1].strip()
-
-
 def _normalize_alias(raw: str) -> str:
     return " ".join(raw.strip().lower().split())
-
-
-async def _learn_auto_aliases(
-    *,
-    db: Database,
-    message: Message,
-    chat_id: int,
-    thread_id: int,
-) -> None:
-    if thread_id == 0:
-        chat_title = (message.chat.title or "").strip()
-        if chat_title:
-            await asyncio.to_thread(
-                db.learn_scope_alias,
-                alias=_normalize_alias(chat_title),
-                chat_id=chat_id,
-                thread_id=0,
-            )
-        return
-
-    topic_name = _extract_topic_name(message)
-    if topic_name:
-        await asyncio.to_thread(
-            db.learn_scope_alias,
-            alias=_normalize_alias(topic_name),
-            chat_id=chat_id,
-            thread_id=thread_id,
-        )
-
-
-async def _resolve_scope_from_message_or_alias(
-    *,
-    message: Message,
-    db: Database,
-    target_chat_id: int | None,
-    target_topic_id: int | None,
-    alias_raw: str,
-) -> tuple[int, int] | None:
-    current_chat_id, current_thread_id = _scope_from_message(message)
-    await _learn_auto_aliases(
-        db=db,
-        message=message,
-        chat_id=current_chat_id,
-        thread_id=current_thread_id,
-    )
-
-    if alias_raw:
-        alias = _normalize_alias(alias_raw)
-        resolved = await asyncio.to_thread(db.resolve_scope_alias, alias=alias)
-        if not resolved:
-            await message.answer(
-                f"Не нашел цель «{alias_raw}». "
-                f"Откройте нужный чат/ветку и выполните: /bind {alias_raw}",
-                reply_markup=_main_keyboard(),
-            )
-            return None
-        return resolved
-
-    if target_chat_id is not None:
-        return target_chat_id, target_topic_id or 0
-    return current_chat_id, current_thread_id
-
-
-def _extract_topic_name(message: Message) -> str:
-    if message.forum_topic_created:
-        return message.forum_topic_created.name
-    if message.forum_topic_edited:
-        return message.forum_topic_edited.name
-    if message.reply_to_message and message.reply_to_message.forum_topic_created:
-        return message.reply_to_message.forum_topic_created.name
-    return ""
 
 
 def _humanize_llm_error(exc: Exception) -> str:
