@@ -59,6 +59,26 @@ def build_router(
     _ = (target_chat_id, target_topic_id)
     router = Router()
 
+    @router.message(F.new_chat_members)
+    async def on_bot_added(message: Message) -> None:
+        members = message.new_chat_members or []
+        me = await message.bot.me()
+        if not any(member.id == me.id for member in members):
+            return
+        chat_id, thread_id = _scope_from_message(message)
+        await message.answer(
+            "Бот подключен. Управление через кнопки внизу.",
+            reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
+        )
+
+    @router.message(F.text.startswith("/start"))
+    async def on_start(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        await message.answer(
+            "Готов к работе. Используйте кнопки внизу для сводки и редактирования.",
+            reply_markup=_keyboard_for_scope(chat_id=chat_id, thread_id=thread_id),
+        )
+
     @router.message(F.text == BTN_HELP)
     async def help_action(message: Message) -> None:
         chat_id, thread_id = _scope_from_message(message)
@@ -713,6 +733,7 @@ def _keyboard_for_scope(*, chat_id: int, thread_id: int) -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
             keyboard=rows,
             resize_keyboard=True,
+            is_persistent=True,
             input_field_placeholder="Режим программиста...",
         )
 
@@ -723,6 +744,7 @@ def _keyboard_for_scope(*, chat_id: int, thread_id: int) -> ReplyKeyboardMarkup:
                 [KeyboardButton(text=BTN_ADD_TASK), KeyboardButton(text=BTN_HELP)],
             ],
             resize_keyboard=True,
+            is_persistent=True,
             input_field_placeholder="Редактирование включено...",
         )
 
@@ -732,6 +754,7 @@ def _keyboard_for_scope(*, chat_id: int, thread_id: int) -> ReplyKeyboardMarkup:
             [KeyboardButton(text=BTN_HELP)],
         ],
         resize_keyboard=True,
+        is_persistent=True,
         input_field_placeholder="Выберите действие...",
     )
 
