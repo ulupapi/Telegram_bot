@@ -19,6 +19,7 @@ def build_router(
     *,
     target_chat_id: int | None,
     target_topic_id: int | None,
+    strict_target_scope: bool,
     context_messages_limit: int,
     db: Database,
     extractor: AIExtractor,
@@ -46,16 +47,72 @@ def build_router(
     @router.message(Command("where"))
     async def cmd_where(message: Message) -> None:
         chat_id, thread_id = _scope_from_message(message)
+        mode = (
+            "Режим области: STRICT_TARGET_SCOPE=on (сбор только из фиксированной цели)."
+            if strict_target_scope and target_chat_id is not None
+            else "Режим области: multi-chat (по умолчанию, текущий чат/ветка)."
+        )
         if thread_id:
             await message.answer(
                 f"Текущий контекст: chat_id={chat_id}, topic_id={thread_id}\n"
-                "Можно сохранить имя: /bind Задания"
+                "Можно сохранить имя: /bind Задания\n"
+                f"{mode}"
             )
         else:
             await message.answer(
                 f"Текущий контекст: chat_id={chat_id} (обычный чат)\n"
-                "Можно сохранить имя: /bind Задания"
+                "Можно сохранить имя: /bind Задания\n"
+                f"{mode}"
             )
+
+    @router.message(Command("health"))
+    async def cmd_health(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        me = await message.bot.get_me()
+        can_read_all = getattr(me, "can_read_all_group_messages", None)
+        bot_label = f"@{me.username}" if me.username else str(me.id)
+        lines = [
+            "🩺 Диагностика бота",
+            f"• Бот: {bot_label}",
+            f"• Chat ID: {chat_id}",
+            f"• Topic ID: {thread_id if thread_id else '—'}",
+            f"• Тип чата: {message.chat.type}",
+        ]
+        if strict_target_scope and target_chat_id is not None:
+            suffix = f", topic_id={target_topic_id}" if target_topic_id else ""
+            lines.append(
+                f"• Scope режим: strict (фиксированная цель chat_id={target_chat_id}{suffix})"
+            )
+        else:
+            lines.append("• Scope режим: multi-chat (текущий чат/ветка)")
+
+        if can_read_all is True:
+            lines.append("• Privacy Mode: выключен (бот видит обычные сообщения групп).")
+        elif can_read_all is False:
+            lines.append(
+                "• Privacy Mode: включен (бот в группах видит в основном команды/упоминания)."
+            )
+        else:
+            lines.append("• Privacy Mode: не удалось определить через Bot API.")
+
+        if message.chat.type in {"group", "supergroup"}:
+            try:
+                member = await message.bot.get_chat_member(message.chat.id, me.id)
+                status = getattr(member, "status", "unknown")
+                lines.append(f"• Статус в группе: {status}")
+            except Exception:
+                lines.append("• Статус в группе: не удалось получить.")
+            lines.extend(
+                [
+                    "",
+                    "Чтобы бот стабильно собирал контекст в группе:",
+                    "1. В BotFather отключите Privacy Mode: /setprivacy -> Disable.",
+                    "2. Выдайте боту права администратора в группе (рекомендуется).",
+                    "3. Напишите 2-3 обычных сообщения и вызовите /status.",
+                ]
+            )
+
+        await message.answer("\n".join(lines))
 
     @router.message(Command("help"))
     async def cmd_help(message: Message) -> None:
@@ -64,6 +121,7 @@ def build_router(
             "• /status [название] — сводка и задачи (каждая задача отдельным сообщением)\n"
             "• /bind <название> — привязать алиас к текущему чату/ветке\n"
             "• /where — показать текущий chat_id/topic_id\n"
+            "• /health — диагностика доступа и режима сбора в текущем чате\n"
             "• /clear_db [название] — очистить данные текущего/указанного контекста\n"
             "• /clear_db all — очистить всю БД\n"
             "• /clear [название] — короткий алиас для /clear_db"
@@ -76,6 +134,7 @@ def build_router(
             db=db,
             target_chat_id=target_chat_id,
             target_topic_id=target_topic_id,
+            strict_target_scope=strict_target_scope,
             alias_raw=_command_argument(message),
         )
         if scope is None:
@@ -89,10 +148,9 @@ def build_router(
             limit=context_messages_limit,
         )
         if not rows:
-            if scope_thread_id:
-                await message.answer("Пока нет сообщений для анализа в этой ветке.")
-            else:
-                await message.answer("Пока нет сообщений для анализа в этом чате.")
+            await message.answer(
+                _empty_context_hint(message=message, scope_thread_id=scope_thread_id)
+            )
             return
 
         try:
@@ -127,6 +185,7 @@ def build_router(
             db=db,
             target_chat_id=target_chat_id,
             target_topic_id=target_topic_id,
+            strict_target_scope=strict_target_scope,
             alias_raw=arg_raw,
         )
         if scope is None:
@@ -161,6 +220,7 @@ def build_router(
             thread_id=thread_id,
             target_chat_id=target_chat_id,
             target_topic_id=target_topic_id,
+            strict_target_scope=strict_target_scope,
         ):
             return
 
@@ -361,7 +421,10 @@ def _is_scope_allowed(
     thread_id: int,
     target_chat_id: int | None,
     target_topic_id: int | None,
+    strict_target_scope: bool,
 ) -> bool:
+    if not strict_target_scope:
+        return True
     if target_chat_id is None:
         return True
     if chat_id != target_chat_id:
@@ -417,6 +480,7 @@ async def _resolve_scope_from_message_or_alias(
     db: Database,
     target_chat_id: int | None,
     target_topic_id: int | None,
+    strict_target_scope: bool,
     alias_raw: str,
 ) -> tuple[int, int] | None:
     current_chat_id, current_thread_id = _scope_from_message(message)
@@ -438,9 +502,27 @@ async def _resolve_scope_from_message_or_alias(
             return None
         return resolved
 
-    if target_chat_id is not None:
+    if strict_target_scope and target_chat_id is not None:
         return target_chat_id, target_topic_id or 0
     return current_chat_id, current_thread_id
+
+
+def _empty_context_hint(*, message: Message, scope_thread_id: int) -> str:
+    if scope_thread_id:
+        base = "Пока нет сообщений для анализа в этой ветке."
+    else:
+        base = "Пока нет сообщений для анализа в этом чате."
+
+    if message.chat.type not in {"group", "supergroup"}:
+        return base
+
+    return (
+        f"{base}\n\n"
+        "Проверьте, что бот получает обычные сообщения в группе:\n"
+        "1. Отключите Privacy Mode у бота в BotFather (/setprivacy -> Disable).\n"
+        "2. Добавьте бота в группу и выдайте права администратора (рекомендуется).\n"
+        "3. Выполните /health в этой группе для быстрой диагностики."
+    )
 
 
 def _extract_topic_name(message: Message) -> str:

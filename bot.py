@@ -24,6 +24,7 @@ class Settings:
     telegram_bot_token: str
     target_chat_id: int | None
     target_topic_id: int | None
+    strict_target_scope: bool
     llm_provider: str
     llm_model: str
     gemini_api_key: str | None
@@ -45,6 +46,7 @@ def load_settings() -> Settings:
     telegram_bot_token = require_env("TELEGRAM_BOT_TOKEN")
     target_chat_id = parse_optional_int("TARGET_CHAT_ID")
     target_topic_id = parse_optional_int("TARGET_TOPIC_ID")
+    strict_target_scope = parse_bool("STRICT_TARGET_SCOPE", default=False)
     llm_provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
 
     gemini_api_key: str | None = None
@@ -73,6 +75,7 @@ def load_settings() -> Settings:
         telegram_bot_token=telegram_bot_token,
         target_chat_id=target_chat_id,
         target_topic_id=target_topic_id,
+        strict_target_scope=strict_target_scope,
         llm_provider=llm_provider,
         llm_model=llm_model,
         gemini_api_key=gemini_api_key,
@@ -111,6 +114,18 @@ def parse_optional_str(name: str) -> str | None:
     return value or None
 
 
+def parse_bool(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO,
@@ -143,6 +158,7 @@ async def main() -> None:
         build_router(
             target_chat_id=settings.target_chat_id,
             target_topic_id=settings.target_topic_id,
+            strict_target_scope=settings.strict_target_scope,
             context_messages_limit=settings.context_messages_limit,
             db=db,
             extractor=extractor,
@@ -153,6 +169,7 @@ async def main() -> None:
         BotCommand(command="status", description="Сводка: сделано / в работе / зависло"),
         BotCommand(command="bind", description="Привязать имя к текущему чату/ветке"),
         BotCommand(command="where", description="Показать текущий chat_id/topic_id"),
+        BotCommand(command="health", description="Проверка доступа в текущем чате"),
         BotCommand(command="clear_db", description="Очистить БД: /clear_db или /clear_db all"),
         BotCommand(command="clear", description="Быстрая очистка: /clear или /clear all"),
         BotCommand(command="help", description="Показать список команд"),
