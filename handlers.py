@@ -5,7 +5,6 @@ import logging
 from datetime import timezone
 
 from aiogram import Router
-from aiogram.filters import Command
 from aiogram.types import Message
 
 from ai_extractor import AIExtractor, StatusReport
@@ -24,9 +23,14 @@ def build_router(
     db: Database,
     extractor: AIExtractor,
 ) -> Router:
+    try:
+        from aiogram.filters import Command as CommandFilter
+    except Exception:
+        from aiogram.dispatcher.filters import Command as CommandFilter  # type: ignore[import-not-found]
+
     router = Router()
 
-    @router.message(Command("bind"))
+    @router.message(CommandFilter("bind"))
     async def cmd_bind(message: Message) -> None:
         alias_raw = _command_argument(message)
         if not alias_raw:
@@ -44,7 +48,7 @@ def build_router(
         suffix = f", topic_id={thread_id}" if thread_id else ""
         await message.answer(f"Сохранил цель «{alias_raw}»: chat_id={chat_id}{suffix}")
 
-    @router.message(Command("where"))
+    @router.message(CommandFilter("where"))
     async def cmd_where(message: Message) -> None:
         chat_id, thread_id = _scope_from_message(message)
         mode = (
@@ -65,7 +69,7 @@ def build_router(
                 f"{mode}"
             )
 
-    @router.message(Command("health"))
+    @router.message(CommandFilter("health"))
     async def cmd_health(message: Message) -> None:
         chat_id, thread_id = _scope_from_message(message)
         me = await message.bot.get_me()
@@ -114,7 +118,7 @@ def build_router(
 
         await message.answer("\n".join(lines))
 
-    @router.message(Command("help"))
+    @router.message(CommandFilter("help"))
     async def cmd_help(message: Message) -> None:
         await message.answer(
             "Команды бота:\n"
@@ -127,7 +131,7 @@ def build_router(
             "• /clear [название] — короткий алиас для /clear_db"
         )
 
-    @router.message(Command("status"))
+    @router.message(CommandFilter("status"))
     async def cmd_status(message: Message) -> None:
         scope = await _resolve_scope_from_message_or_alias(
             message=message,
@@ -164,7 +168,7 @@ def build_router(
         for chunk in _render_status_messages(report):
             await message.answer(chunk)
 
-    @router.message(Command(commands=["clear_db", "clear"]))
+    @router.message(CommandFilter(commands=["clear_db", "clear"]))
     async def cmd_clear_db(message: Message) -> None:
         arg_raw = _command_argument(message)
         arg_clean = _normalize_alias(arg_raw) if arg_raw else ""
