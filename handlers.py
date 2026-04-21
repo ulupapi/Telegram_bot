@@ -5,6 +5,10 @@ import logging
 from datetime import timezone
 
 from aiogram import Router
+try:
+    from aiogram import F
+except Exception:  # pragma: no cover - compatibility fallback
+    from magic_filter import F  # type: ignore
 from aiogram.types import Message
 
 from ai_extractor import AIExtractor, StatusReport
