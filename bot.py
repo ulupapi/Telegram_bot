@@ -6,12 +6,6 @@ import os
 from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import (
-    BotCommand,
-    BotCommandScopeAllGroupChats,
-    BotCommandScopeAllPrivateChats,
-    BotCommandScopeDefault,
-)
 from dotenv import load_dotenv
 
 from ai_extractor import AIExtractor
@@ -165,18 +159,7 @@ async def main() -> None:
         )
     )
 
-    commands = [
-        BotCommand(command="status", description="Сводка: сделано / в работе / зависло"),
-        BotCommand(command="bind", description="Привязать имя к текущему чату/ветке"),
-        BotCommand(command="where", description="Показать текущий chat_id/topic_id"),
-        BotCommand(command="health", description="Проверка доступа в текущем чате"),
-        BotCommand(command="clear_db", description="Очистить БД: /clear_db или /clear_db all"),
-        BotCommand(command="clear", description="Быстрая очистка: /clear или /clear all"),
-        BotCommand(command="help", description="Показать список команд"),
-    ]
-    await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
-    await bot.set_my_commands(commands, scope=BotCommandScopeAllPrivateChats())
-    await bot.set_my_commands(commands, scope=BotCommandScopeAllGroupChats())
+    await _configure_bot_commands(bot)
 
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
@@ -187,3 +170,61 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
+def _load_bot_command_types():
+    try:
+        from aiogram.types import (
+            BotCommand as BotCommandType,
+            BotCommandScopeAllGroupChats as BotCommandScopeAllGroupChatsType,
+            BotCommandScopeAllPrivateChats as BotCommandScopeAllPrivateChatsType,
+            BotCommandScopeDefault as BotCommandScopeDefaultType,
+        )
+        return (
+            BotCommandType,
+            BotCommandScopeDefaultType,
+            BotCommandScopeAllPrivateChatsType,
+            BotCommandScopeAllGroupChatsType,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to import BotCommand types, command menu setup is skipped: %s",
+            exc,
+        )
+        return None
+
+
+async def _configure_bot_commands(bot: Bot) -> None:
+    command_types = _load_bot_command_types()
+    if command_types is None:
+        return
+
+    (
+        BotCommandType,
+        BotCommandScopeDefaultType,
+        BotCommandScopeAllPrivateChatsType,
+        BotCommandScopeAllGroupChatsType,
+    ) = command_types
+
+    commands = [
+        BotCommandType(command="status", description="Сводка: сделано / в работе / зависло"),
+        BotCommandType(command="bind", description="Привязать имя к текущему чату/ветке"),
+        BotCommandType(command="where", description="Показать текущий chat_id/topic_id"),
+        BotCommandType(command="health", description="Проверка доступа в текущем чате"),
+        BotCommandType(command="clear_db", description="Очистить БД: /clear_db или /clear_db all"),
+        BotCommandType(command="clear", description="Быстрая очистка: /clear или /clear all"),
+        BotCommandType(command="help", description="Показать список команд"),
+    ]
+    scopes = [
+        BotCommandScopeDefaultType(),
+        BotCommandScopeAllPrivateChatsType(),
+        BotCommandScopeAllGroupChatsType(),
+    ]
+    for scope in scopes:
+        try:
+            await bot.set_my_commands(commands, scope=scope)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to register bot commands for scope %s",
+                type(scope).__name__,
+            )
