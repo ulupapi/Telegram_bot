@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 from dataclasses import dataclass
@@ -148,6 +149,7 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     dp = Dispatcher()
+    scheduler_task: asyncio.Task | None = None
     dp.include_router(
         build_router(
             target_chat_id=settings.target_chat_id,
@@ -164,6 +166,10 @@ async def main() -> None:
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
+        if scheduler_task is not None:
+            scheduler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await scheduler_task
         db.close()
         await bot.session.close()
 
