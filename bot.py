@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import contextlib
 import logging
 import os
@@ -11,6 +12,72 @@ from dotenv import load_dotenv
 
 from ai_extractor import AIExtractor
 from database import Database
+
+
+def _install_runtime_compat_shims() -> None:
+    logger = logging.getLogger(__name__)
+    installed: list[str] = []
+
+    # Backward compatibility for drifted handlers that reference F/Command
+    # without explicit imports in module scope.
+    if not hasattr(builtins, "F"):
+        try:
+            from aiogram import F as FilterF  # type: ignore
+        except Exception:
+            try:
+                from magic_filter import F as FilterF  # type: ignore
+            except Exception:
+                FilterF = None  # type: ignore
+        if FilterF is not None:
+            setattr(builtins, "F", FilterF)
+            installed.append("F")
+
+    if not hasattr(builtins, "Command"):
+        try:
+            from aiogram.filters import Command as CommandFilter  # type: ignore
+        except Exception:
+            try:
+                from aiogram.dispatcher.filters import Command as CommandFilter  # type: ignore
+            except Exception:
+                CommandFilter = None  # type: ignore
+        if CommandFilter is not None:
+            setattr(builtins, "Command", CommandFilter)
+            installed.append("Command")
+
+    if not hasattr(builtins, "BotCommand"):
+        try:
+            from aiogram.types import (
+                BotCommand as BotCommandType,
+                BotCommandScopeAllGroupChats as BotCommandScopeAllGroupChatsType,
+                BotCommandScopeAllPrivateChats as BotCommandScopeAllPrivateChatsType,
+                BotCommandScopeDefault as BotCommandScopeDefaultType,
+            )
+        except Exception:
+            BotCommandType = None  # type: ignore
+            BotCommandScopeDefaultType = None  # type: ignore
+            BotCommandScopeAllPrivateChatsType = None  # type: ignore
+            BotCommandScopeAllGroupChatsType = None  # type: ignore
+
+        if BotCommandType is not None:
+            setattr(builtins, "BotCommand", BotCommandType)
+            setattr(builtins, "BotCommandScopeDefault", BotCommandScopeDefaultType)
+            setattr(builtins, "BotCommandScopeAllPrivateChats", BotCommandScopeAllPrivateChatsType)
+            setattr(builtins, "BotCommandScopeAllGroupChats", BotCommandScopeAllGroupChatsType)
+            installed.extend(
+                [
+                    "BotCommand",
+                    "BotCommandScopeDefault",
+                    "BotCommandScopeAllPrivateChats",
+                    "BotCommandScopeAllGroupChats",
+                ]
+            )
+
+    if installed:
+        logger.warning("Installed runtime compat shims: %s", ", ".join(installed))
+
+
+_install_runtime_compat_shims()
+
 from handlers import build_router
 
 
