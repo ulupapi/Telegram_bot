@@ -168,10 +168,6 @@ async def main() -> None:
         await bot.session.close()
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
-
-
 def _load_bot_command_types():
     try:
         from aiogram.types import (
@@ -228,3 +224,7 @@ async def _configure_bot_commands(bot: Bot) -> None:
                 "Failed to register bot commands for scope %s",
                 type(scope).__name__,
             )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
