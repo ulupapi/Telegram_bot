@@ -34,6 +34,76 @@ def build_router(
 
     router = Router()
 
+    def render_status_messages_safe(report: StatusReport) -> list[str]:
+        # Local renderer keeps /status stable even if module-level helper
+        # symbols are missing in a drifted deployment build.
+        status_icons = {
+            "В ожидании": "🟡",
+            "В работе": "🔵",
+            "Завершена": "🟢",
+            "Отклонена": "🔴",
+            "Отозвана": "⚪",
+        }
+
+        lines = ["📌 Сводка по ветке"]
+        lines.append("\n✅ Что сделано")
+        if report.done:
+            for idx, item in enumerate(report.done, start=1):
+                lines.append(f"{idx}. {item}")
+        else:
+            lines.append("• Новых завершенных задач нет.")
+
+        lines.append("\n🛠 Что в работе")
+        if report.in_progress:
+            for idx, item in enumerate(report.in_progress, start=1):
+                lines.append(f"{idx}. {item}")
+        else:
+            lines.append("• Активных задач не найдено.")
+
+        lines.append("\n⛔ Что зависло")
+        if report.blocked:
+            for idx, item in enumerate(report.blocked, start=1):
+                lines.append(f"{idx}. {item}")
+        else:
+            lines.append("• Блокеров не найдено.")
+
+        lines.append("\n📋 Статусы задач:")
+        if not report.tasks:
+            lines.append("• Задач нет.")
+            return ["\n".join(lines), "📋 Реестр задач\n• Задачи не найдены."]
+
+        for status in STATUS_ORDER:
+            count = sum(1 for task in report.tasks if task.status == status)
+            if count:
+                lines.append(f"• {status_icons.get(status, '▫️')} {status}: {count}")
+
+        messages = ["\n".join(lines)]
+        ordered_tasks = []
+        for status in STATUS_ORDER:
+            ordered_tasks.extend([task for task in report.tasks if task.status == status])
+        total = len(ordered_tasks)
+        for idx, task in enumerate(ordered_tasks, start=1):
+            description = (task.description or "").strip() or "Не указано"
+            if len(description) > 900:
+                description = description[:899].rstrip() + "…"
+            messages.append(
+                "\n".join(
+                    [
+                        f"🧩 Задача {idx} из {total}",
+                        f"📅 Дедлайн: {task.deadline_date or '—'}",
+                        "🌐 Основная информация:",
+                        f"1. Название: {task.title}",
+                        f"2. Автор: {task.author_name}",
+                        f"3. Исполнитель: {task.assignee}",
+                        f"4. Статус: {status_icons.get(task.status, '▫️')} {task.status}",
+                        f"5. ID: {task.external_id}",
+                        "6. Описание:",
+                        f"«{description}»",
+                    ]
+                )
+            )
+        return messages
+
     @router.message(CommandFilter("bind"))
     async def cmd_bind(message: Message) -> None:
         alias_raw = _command_argument(message)
@@ -169,7 +239,7 @@ def build_router(
             await message.answer(_humanize_llm_error(exc))
             return
 
-        for chunk in _render_status_messages(report):
+        for chunk in render_status_messages_safe(report):
             await message.answer(chunk)
 
     @router.message(CommandFilter(commands=["clear_db", "clear"]))
