@@ -546,6 +546,16 @@ def _extract_topic_name(message: Message) -> str:
 def _humanize_llm_error(exc: Exception) -> str:
     text = str(exc).lower()
     if (
+        "you exceeded your current quota" in text
+        or "platform.openai.com/docs/guides/error-codes/api-errors" in text
+    ):
+        return (
+            "Ошибка пришла от OpenAI (quota exceeded). "
+            "Это означает, что запрос ушел в OpenAI API. "
+            "Если вы хотите использовать Amvera, проверьте переменные окружения: "
+            "LLM_PROVIDER=amvera, AMVERA_LLM_API_KEY, AMVERA_LLM_BASE_URL, AMVERA_LLM_MODEL."
+        )
+    if (
         "insufficient_quota" in text
         or "resource_exhausted" in text
         or "quota exceeded" in text

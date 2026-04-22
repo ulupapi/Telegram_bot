@@ -127,6 +127,7 @@ async def main() -> None:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
     settings = load_settings()
+    _log_llm_runtime_settings(settings)
 
     db = Database(
         settings.sqlite_path,
@@ -230,6 +231,34 @@ async def _configure_bot_commands(bot: Bot) -> None:
                 "Failed to register bot commands for scope %s",
                 type(scope).__name__,
             )
+
+
+def _log_llm_runtime_settings(settings: Settings) -> None:
+    logger = logging.getLogger(__name__)
+    provider = settings.llm_provider
+    if provider == "openai":
+        base_url = settings.openai_base_url or "https://api.openai.com/v1 (default)"
+        logger.info("LLM provider=openai model=%s base_url=%s", settings.llm_model, base_url)
+        if not settings.openai_base_url:
+            logger.warning(
+                "OPENAI_BASE_URL is empty: requests will be sent to OpenAI directly."
+            )
+        return
+
+    if provider == "amvera":
+        logger.info(
+            "LLM provider=amvera model=%s base_url=%s fallback_model=%s",
+            settings.llm_model,
+            settings.amvera_base_url or "<empty>",
+            settings.amvera_fallback_model or "<none>",
+        )
+        return
+
+    if provider == "gemini":
+        logger.info("LLM provider=gemini model=%s", settings.llm_model)
+        return
+
+    logger.warning("LLM provider has unexpected value: %s", provider)
 
 
 if __name__ == "__main__":
