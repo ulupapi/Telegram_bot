@@ -30,6 +30,17 @@ def build_router(
 
     router = Router()
 
+    def is_scope_allowed_local(*, chat_id: int, thread_id: int) -> bool:
+        if not strict_target_scope:
+            return True
+        if target_chat_id is None:
+            return True
+        if chat_id != target_chat_id:
+            return False
+        if target_topic_id is None:
+            return True
+        return thread_id == target_topic_id
+
     def render_status_messages_safe(report: StatusReport) -> list[str]:
         # Local renderer keeps /status stable even if module-level helper
         # symbols are missing in a drifted deployment build.
@@ -289,13 +300,7 @@ def build_router(
             return
 
         chat_id, thread_id = _scope_from_message(message)
-        if not _is_scope_allowed(
-            chat_id=chat_id,
-            thread_id=thread_id,
-            target_chat_id=target_chat_id,
-            target_topic_id=target_topic_id,
-            strict_target_scope=strict_target_scope,
-        ):
+        if not is_scope_allowed_local(chat_id=chat_id, thread_id=thread_id):
             return
 
         author = _telegram_author(message)
