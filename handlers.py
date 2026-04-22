@@ -2,16 +2,139 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
+from dataclasses import dataclass
 from datetime import timezone
+from html import escape
 
-from aiogram import Router
-from aiogram.types import Message
+from aiogram import Bot, Router
+from aiogram.types import (
+    CallbackQuery,
+    ChatMemberUpdated,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 
 from ai_extractor import AIExtractor, StatusReport
-from database import Database
+from database import Database, TaskRecord
 
 logger = logging.getLogger(__name__)
 STATUS_ORDER = ["В ожидании", "В работе", "Завершена", "Отклонена", "Отозвана"]
+
+BTN_SUMMARY = "📊 Получить сводку"
+BTN_EDIT_TASK = "✏️ Редактировать задачи"
+BTN_HELP = "❓ Помощь"
+BTN_DEV_ENTER = "🛠 Режим программиста"
+BTN_DEV_BACK = "👤 Обычный режим"
+BTN_DEV_CLEAR_SCOPE = "🧹 Очистить текущий контекст"
+BTN_DEV_CLEAR_ALL = "🧨 Очистить всю БД"
+BTN_DEV_SCHEDULE = "🕒 Параметры расписания"
+BTN_DEV_WHERE = "📍 Текущий контекст"
+BTN_EDIT_CANCEL = "Отмена"
+
+DEV_CLEAR_ALL_CONFIRM_YES = "dev_clear_all|yes"
+DEV_CLEAR_ALL_CONFIRM_NO = "dev_clear_all|no"
+EDIT_TASK_PICK_PREFIX = "edit_task|"
+EDIT_FIELD_PREFIX = "edit_field|"
+EDIT_STATUS_PREFIX = "edit_status|"
+EDIT_CANCEL_CALLBACK = "edit|cancel"
+
+FIELD_TITLE = "title"
+FIELD_DESCRIPTION = "description"
+FIELD_DEADLINE = "deadline_date"
+FIELD_AUTHOR = "author_name"
+FIELD_ASSIGNEE = "assignee"
+FIELD_STATUS = "status"
+
+STATUS_TO_CODE = {
+    "В ожидании": "w",
+    "В работе": "p",
+    "Завершена": "d",
+    "Отклонена": "r",
+    "Отозвана": "x",
+}
+CODE_TO_STATUS = {value: key for key, value in STATUS_TO_CODE.items()}
+
+CONTROL_BUTTON_TEXTS = {
+    BTN_SUMMARY,
+    BTN_EDIT_TASK,
+    BTN_HELP,
+    BTN_DEV_ENTER,
+    BTN_DEV_BACK,
+    BTN_DEV_CLEAR_SCOPE,
+    BTN_DEV_CLEAR_ALL,
+    BTN_DEV_SCHEDULE,
+    BTN_DEV_WHERE,
+    BTN_EDIT_CANCEL,
+}
+
+# key: (chat_id, thread_id, user_id)
+DEV_MODE_SCOPES: set[tuple[int, int, int]] = set()
+EDIT_SELECTION_OPTIONS: dict[tuple[int, int, int], dict[str, str]] = {}
+EDIT_TARGET_TASK: dict[tuple[int, int, int], str] = {}
+PENDING_EDIT_TASK: dict[tuple[int, int, int], tuple[str, str]] = {}
+
+# key: (chat_id, thread_id)
+SUMMARY_MESSAGE_IDS: dict[tuple[int, int], list[int]] = {}
+
+
+@dataclass(frozen=True)
+class RenderedMessage:
+    text: str
+    parse_mode: str | None = None
+
+
+async def build_and_publish_scope_summary(
+    *,
+    bot: Bot,
+    db: Database,
+    extractor: AIExtractor,
+    chat_id: int,
+    thread_id: int,
+    context_messages_limit: int,
+    replace_previous: bool = True,
+) -> bool:
+    rows = await asyncio.to_thread(
+        db.get_recent_thread_messages,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        limit=context_messages_limit,
+    )
+    if not rows:
+        return False
+
+    report = await asyncio.to_thread(extractor.extract_status, rows)
+    await asyncio.to_thread(
+        db.replace_tasks_for_scope,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        tasks=report.tasks,
+    )
+    await _publish_rendered_summary(
+        bot=bot,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        messages=render_status_messages_safe(report),
+        replace_previous=replace_previous,
+    )
+    return True
+
+
+def render_status_messages_safe(report: StatusReport) -> list[RenderedMessage]:
+    summary = _render_summary_message(report)
+    if not report.tasks:
+        return [RenderedMessage(text=summary)]
+
+    tasks = _ordered_tasks(report)
+    messages = [RenderedMessage(text=summary)]
+    total = len(tasks)
+    for idx, task in enumerate(tasks, start=1):
+        messages.append(_render_task_message_html(task_index=idx, total=total, task=task))
+    return messages
 
 
 def build_router(
@@ -41,75 +164,262 @@ def build_router(
             return True
         return thread_id == target_topic_id
 
-    def render_status_messages_safe(report: StatusReport) -> list[str]:
-        # Local renderer keeps /status stable even if module-level helper
-        # symbols are missing in a drifted deployment build.
-        status_icons = {
-            "В ожидании": "🟡",
-            "В работе": "🔵",
-            "Завершена": "🟢",
-            "Отклонена": "🔴",
-            "Отозвана": "⚪",
-        }
-
-        lines = ["📌 Сводка по ветке"]
-        lines.append("\n✅ Что сделано")
-        if report.done:
-            for idx, item in enumerate(report.done, start=1):
-                lines.append(f"{idx}. {item}")
-        else:
-            lines.append("• Новых завершенных задач нет.")
-
-        lines.append("\n🛠 Что в работе")
-        if report.in_progress:
-            for idx, item in enumerate(report.in_progress, start=1):
-                lines.append(f"{idx}. {item}")
-        else:
-            lines.append("• Активных задач не найдено.")
-
-        lines.append("\n⛔ Что зависло")
-        if report.blocked:
-            for idx, item in enumerate(report.blocked, start=1):
-                lines.append(f"{idx}. {item}")
-        else:
-            lines.append("• Блокеров не найдено.")
-
-        lines.append("\n📋 Статусы задач:")
-        if not report.tasks:
-            lines.append("• Задач нет.")
-            return ["\n".join(lines), "📋 Реестр задач\n• Задачи не найдены."]
-
-        for status in STATUS_ORDER:
-            count = sum(1 for task in report.tasks if task.status == status)
-            if count:
-                lines.append(f"• {status_icons.get(status, '▫️')} {status}: {count}")
-
-        messages = ["\n".join(lines)]
-        ordered_tasks = []
-        for status in STATUS_ORDER:
-            ordered_tasks.extend([task for task in report.tasks if task.status == status])
-        total = len(ordered_tasks)
-        for idx, task in enumerate(ordered_tasks, start=1):
-            description = (task.description or "").strip() or "Не указано"
-            if len(description) > 900:
-                description = description[:899].rstrip() + "…"
-            messages.append(
-                "\n".join(
-                    [
-                        f"🧩 Задача {idx} из {total}",
-                        f"📅 Дедлайн: {task.deadline_date or '—'}",
-                        "🌐 Основная информация:",
-                        f"1. Название: {task.title}",
-                        f"2. Автор: {task.author_name}",
-                        f"3. Исполнитель: {task.assignee}",
-                        f"4. Статус: {status_icons.get(task.status, '▫️')} {task.status}",
-                        f"5. ID: {task.external_id}",
-                        "6. Описание:",
-                        f"«{description}»",
-                    ]
-                )
+    def scope_mismatch_text() -> str:
+        if target_chat_id is None and target_topic_id is None:
+            return ""
+        if target_topic_id is None:
+            return (
+                "Этот бот привязан к другому чату. "
+                f"Разрешенный TARGET_CHAT_ID={target_chat_id}."
             )
-        return messages
+        return (
+            "Этот бот привязан к другому чату/ветке. "
+            f"Разрешены TARGET_CHAT_ID={target_chat_id}, TARGET_TOPIC_ID={target_topic_id}."
+        )
+
+    async def _send_home(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        user_id = _user_id_from_message(message)
+        await message.answer(
+            _startup_text(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                target_chat_id=target_chat_id,
+                target_topic_id=target_topic_id,
+                strict_target_scope=strict_target_scope,
+                include_group_tip=message.chat.type in {"group", "supergroup"},
+            ),
+            reply_markup=_keyboard_for_user_scope(chat_id=chat_id, thread_id=thread_id, user_id=user_id),
+        )
+
+    async def _handle_status_request(message: Message, alias_raw: str = "") -> None:
+        scope = await _resolve_scope_from_message_or_alias(
+            message=message,
+            db=db,
+            target_chat_id=target_chat_id,
+            target_topic_id=target_topic_id,
+            strict_target_scope=strict_target_scope,
+            alias_raw=alias_raw,
+        )
+        if scope is None:
+            return
+        scope_chat_id, scope_thread_id = scope
+
+        try:
+            sent = await build_and_publish_scope_summary(
+                bot=message.bot,
+                db=db,
+                extractor=extractor,
+                chat_id=scope_chat_id,
+                thread_id=scope_thread_id,
+                context_messages_limit=context_messages_limit,
+                replace_previous=True,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Failed to build status report for chat_id=%s thread_id=%s",
+                scope_chat_id,
+                scope_thread_id,
+            )
+            await message.answer(_humanize_llm_error(exc))
+            return
+
+        if not sent:
+            await message.answer(
+                _empty_context_hint(message=message, scope_thread_id=scope_thread_id)
+            )
+            return
+
+    async def _handle_clear_scope(message: Message, arg_raw: str = "") -> None:
+        scope = await _resolve_scope_from_message_or_alias(
+            message=message,
+            db=db,
+            target_chat_id=target_chat_id,
+            target_topic_id=target_topic_id,
+            strict_target_scope=strict_target_scope,
+            alias_raw=arg_raw,
+        )
+        if scope is None:
+            return
+        scope_chat_id, scope_thread_id = scope
+
+        deleted_messages, deleted_tasks = await asyncio.to_thread(
+            db.clear_scope,
+            chat_id=scope_chat_id,
+            thread_id=scope_thread_id,
+        )
+        await _delete_previous_summary_messages(
+            bot=message.bot,
+            chat_id=scope_chat_id,
+            thread_id=scope_thread_id,
+        )
+        scope_suffix = f", topic_id={scope_thread_id}" if scope_thread_id else ""
+        await message.answer(
+            "🧹 Контекст очищен.\n"
+            f"• Сообщений удалено: {deleted_messages}\n"
+            f"• Задач удалено: {deleted_tasks}\n"
+            f"• Контекст: chat_id={scope_chat_id}{scope_suffix}"
+        )
+
+    async def _show_help(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        user_id = _user_id_from_message(message)
+        await message.answer(
+            "Команды:\n"
+            "• /status [алиас] — получить сводку через LLM\n"
+            "• /bind <алиас> — привязать имя к текущему чату/ветке\n"
+            "• /edit — открыть режим редактирования задач\n"
+            "• /where — показать текущий chat_id/topic_id\n"
+            "• /health — диагностика доступа в текущем чате\n"
+            "• /clear_db [алиас] — очистка текущего/указанного контекста\n"
+            "• /clear_db all — очистка всей базы\n\n"
+            "Кнопки главного меню:\n"
+            f"• {BTN_SUMMARY} — запрос сводки у LLM и вывод задач\n"
+            f"• {BTN_EDIT_TASK} — выбор задачи и ручное редактирование\n"
+            f"• {BTN_HELP} — эта справка\n"
+            f"• {BTN_DEV_ENTER} — расширенные операции (очистка/диагностика/расписание)",
+            reply_markup=_keyboard_for_user_scope(chat_id=chat_id, thread_id=thread_id, user_id=user_id),
+        )
+
+    async def _show_where(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        mode = (
+            "Режим области: STRICT_TARGET_SCOPE=on (сбор только из фиксированной цели)."
+            if strict_target_scope and target_chat_id is not None
+            else "Режим области: multi-chat (текущий чат/ветка)."
+        )
+        if thread_id:
+            await message.answer(
+                f"Текущий контекст: chat_id={chat_id}, topic_id={thread_id}\n"
+                "Можно сохранить имя: /bind Задания\n"
+                f"{mode}"
+            )
+            return
+        await message.answer(
+            f"Текущий контекст: chat_id={chat_id} (обычный чат)\n"
+            "Можно сохранить имя: /bind Задания\n"
+            f"{mode}"
+        )
+
+    async def _show_schedule_info(message: Message) -> None:
+        enabled = os.getenv("SCHEDULE_ENABLED", "0")
+        morning = os.getenv("SUMMARY_MORNING_TIME", "09:00")
+        evening = os.getenv("SUMMARY_EVENING_TIME", "18:00")
+        timezone_name = (
+            os.getenv("SCHEDULE_TIMEZONE")
+            or os.getenv("TIMEZONE")
+            or os.getenv("TZ")
+            or "Europe/Moscow"
+        )
+        await message.answer(
+            "🕒 Параметры расписания\n"
+            f"• SCHEDULE_ENABLED={enabled}\n"
+            f"• SUMMARY_MORNING_TIME={morning}\n"
+            f"• SUMMARY_EVENING_TIME={evening}\n"
+            f"• TIMEZONE={timezone_name}\n\n"
+            "Если включено, бот отправляет сводку дважды в день для известных контекстов."
+        )
+
+    async def _start_edit_mode(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        if not is_scope_allowed_local(chat_id=chat_id, thread_id=thread_id):
+            mismatch = scope_mismatch_text()
+            if mismatch:
+                await message.answer(mismatch)
+            return
+        user_id = _user_id_from_message(message)
+        key = (chat_id, thread_id, user_id)
+
+        try:
+            tasks = await asyncio.to_thread(
+                db.get_tasks_for_scope,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to load tasks for edit mode chat_id=%s thread_id=%s",
+                chat_id,
+                thread_id,
+            )
+            await message.answer("Не удалось загрузить задачи из БД. Попробуйте еще раз.")
+            return
+
+        if not tasks:
+            await message.answer(
+                "В этом контексте пока нет задач для редактирования. Сначала нажмите «Получить сводку»."
+            )
+            return
+
+        ordered = sorted(tasks, key=_task_sort_key)
+        selection: dict[str, str] = {}
+        buttons: list[list[InlineKeyboardButton]] = []
+        max_buttons = 30
+        for idx, task in enumerate(ordered[:max_buttons], start=1):
+            token = str(idx)
+            selection[token] = task.external_id
+            title = _trim_text(task.title, limit=40) or "Без названия"
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"{idx}. {title}",
+                        callback_data=f"{EDIT_TASK_PICK_PREFIX}{token}",
+                    )
+                ]
+            )
+        buttons.append(
+            [InlineKeyboardButton(text="Отмена", callback_data=EDIT_CANCEL_CALLBACK)]
+        )
+
+        EDIT_SELECTION_OPTIONS[key] = selection
+        EDIT_TARGET_TASK.pop(key, None)
+        PENDING_EDIT_TASK.pop(key, None)
+
+        note = ""
+        if len(ordered) > max_buttons:
+            note = f"\nПоказаны первые {max_buttons} задач из {len(ordered)}."
+
+        await message.answer(
+            "Выберите задачу для редактирования:" + note,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        )
+
+    @router.my_chat_member()
+    async def on_bot_added(event: ChatMemberUpdated) -> None:
+        if not _is_bot_connected_to_chat(event):
+            return
+        if event.chat.type not in {"group", "supergroup"}:
+            return
+        chat_id = event.chat.id
+        thread_id = 0
+        if not is_scope_allowed_local(chat_id=chat_id, thread_id=thread_id):
+            mismatch = scope_mismatch_text()
+            if mismatch:
+                await event.bot.send_message(chat_id=chat_id, text=mismatch)
+            return
+
+        await event.bot.send_message(
+            chat_id=chat_id,
+            text=_startup_text(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                target_chat_id=target_chat_id,
+                target_topic_id=target_topic_id,
+                strict_target_scope=strict_target_scope,
+                include_group_tip=True,
+            ),
+            reply_markup=_keyboard_for_user_scope(chat_id=chat_id, thread_id=thread_id, user_id=0),
+        )
+
+    @router.message(CommandFilter("start"))
+    async def on_start(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        if not is_scope_allowed_local(chat_id=chat_id, thread_id=thread_id):
+            mismatch = scope_mismatch_text()
+            if mismatch:
+                await message.answer(mismatch)
+            return
+        await _send_home(message)
 
     @router.message(CommandFilter("bind"))
     async def cmd_bind(message: Message) -> None:
@@ -119,6 +429,12 @@ def build_router(
             return
 
         chat_id, thread_id = _scope_from_message(message)
+        if not is_scope_allowed_local(chat_id=chat_id, thread_id=thread_id):
+            mismatch = scope_mismatch_text()
+            if mismatch:
+                await message.answer(mismatch)
+            return
+
         alias = _normalize_alias(alias_raw)
         await asyncio.to_thread(
             db.set_manual_scope_alias,
@@ -131,24 +447,7 @@ def build_router(
 
     @router.message(CommandFilter("where"))
     async def cmd_where(message: Message) -> None:
-        chat_id, thread_id = _scope_from_message(message)
-        mode = (
-            "Режим области: STRICT_TARGET_SCOPE=on (сбор только из фиксированной цели)."
-            if strict_target_scope and target_chat_id is not None
-            else "Режим области: multi-chat (по умолчанию, текущий чат/ветка)."
-        )
-        if thread_id:
-            await message.answer(
-                f"Текущий контекст: chat_id={chat_id}, topic_id={thread_id}\n"
-                "Можно сохранить имя: /bind Задания\n"
-                f"{mode}"
-            )
-        else:
-            await message.answer(
-                f"Текущий контекст: chat_id={chat_id} (обычный чат)\n"
-                "Можно сохранить имя: /bind Задания\n"
-                f"{mode}"
-            )
+        await _show_where(message)
 
     @router.message(CommandFilter("health"))
     async def cmd_health(message: Message) -> None:
@@ -201,73 +500,23 @@ def build_router(
 
     @router.message(CommandFilter("help"))
     async def cmd_help(message: Message) -> None:
-        await message.answer(
-            "Команды бота:\n"
-            "• /status [название] — сводка и задачи (каждая задача отдельным сообщением)\n"
-            "• /bind <название> — привязать алиас к текущему чату/ветке\n"
-            "• /where — показать текущий chat_id/topic_id\n"
-            "• /health — диагностика доступа и режима сбора в текущем чате\n"
-            "• /clear_db [название] — очистить данные текущего/указанного контекста\n"
-            "• /clear_db all — очистить всю БД\n"
-            "• /clear [название] — короткий алиас для /clear_db"
-        )
+        await _show_help(message)
+
+    @router.message(CommandFilter("edit"))
+    async def cmd_edit(message: Message) -> None:
+        await _start_edit_mode(message)
 
     @router.message(CommandFilter("status"))
     async def cmd_status(message: Message) -> None:
-        scope = await _resolve_scope_from_message_or_alias(
-            message=message,
-            db=db,
-            target_chat_id=target_chat_id,
-            target_topic_id=target_topic_id,
-            strict_target_scope=strict_target_scope,
-            alias_raw=_command_argument(message),
-        )
-        if scope is None:
-            return
-        scope_chat_id, scope_thread_id = scope
-
-        try:
-            rows = await asyncio.to_thread(
-                db.get_recent_thread_messages,
-                chat_id=scope_chat_id,
-                thread_id=scope_thread_id,
-                limit=context_messages_limit,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to load context messages for chat_id=%s thread_id=%s",
-                scope_chat_id,
-                scope_thread_id,
-            )
-            await message.answer(
-                "Временная ошибка доступа к базе данных. Попробуйте повторить через 5-10 секунд."
-            )
-            return
-        if not rows:
-            await message.answer(
-                _empty_context_hint(message=message, scope_thread_id=scope_thread_id)
-            )
-            return
-
-        try:
-            report = await asyncio.to_thread(extractor.extract_status, rows)
-            await asyncio.to_thread(db.replace_tasks, report.tasks)
-        except Exception as exc:
-            logger.exception("Failed to build status report")
-            await message.answer(_humanize_llm_error(exc))
-            return
-
-        for chunk in render_status_messages_safe(report):
-            await message.answer(chunk)
+        await _handle_status_request(message, _command_argument(message))
 
     @router.message(CommandFilter(commands=["clear_db", "clear"]))
     async def cmd_clear_db(message: Message) -> None:
         arg_raw = _command_argument(message)
         arg_clean = _normalize_alias(arg_raw) if arg_raw else ""
         if arg_clean in {"all", "все"}:
-            deleted_messages, deleted_tasks, deleted_aliases = await asyncio.to_thread(
-                db.clear_all
-            )
+            deleted_messages, deleted_tasks, deleted_aliases = await asyncio.to_thread(db.clear_all)
+            SUMMARY_MESSAGE_IDS.clear()
             await message.answer(
                 "🧹 База очищена полностью.\n"
                 f"• Сообщений удалено: {deleted_messages}\n"
@@ -275,32 +524,286 @@ def build_router(
                 f"• Привязок удалено: {deleted_aliases}"
             )
             return
+        await _handle_clear_scope(message, arg_raw)
 
-        scope = await _resolve_scope_from_message_or_alias(
-            message=message,
-            db=db,
-            target_chat_id=target_chat_id,
-            target_topic_id=target_topic_id,
-            strict_target_scope=strict_target_scope,
-            alias_raw=arg_raw,
-        )
-        if scope is None:
-            return
-        scope_chat_id, scope_thread_id = scope
+    @router.message(lambda m: ((m.text or "").strip() == BTN_SUMMARY))
+    async def btn_summary(message: Message) -> None:
+        await _handle_status_request(message)
 
-        deleted_messages, deleted_tasks = await asyncio.to_thread(
-            db.clear_scope,
-            chat_id=scope_chat_id,
-            thread_id=scope_thread_id,
-        )
-        scope_suffix = f", topic_id={scope_thread_id}" if scope_thread_id else ""
+    @router.message(lambda m: ((m.text or "").strip() == BTN_HELP))
+    async def btn_help(message: Message) -> None:
+        await _show_help(message)
+
+    @router.message(lambda m: ((m.text or "").strip() == BTN_EDIT_TASK))
+    async def btn_edit(message: Message) -> None:
+        await _start_edit_mode(message)
+
+    @router.message(lambda m: ((m.text or "").strip() == BTN_DEV_ENTER))
+    async def btn_dev_enter(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        user_id = _user_id_from_message(message)
+        key = (chat_id, thread_id, user_id)
+        DEV_MODE_SCOPES.add(key)
         await message.answer(
-            "🧹 Контекст очищен.\n"
+            "Режим программиста включен.",
+            reply_markup=_keyboard_for_user_scope(chat_id=chat_id, thread_id=thread_id, user_id=user_id),
+        )
+
+    @router.message(lambda m: ((m.text or "").strip() == BTN_DEV_BACK))
+    async def btn_dev_back(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        user_id = _user_id_from_message(message)
+        key = (chat_id, thread_id, user_id)
+        DEV_MODE_SCOPES.discard(key)
+        EDIT_SELECTION_OPTIONS.pop(key, None)
+        EDIT_TARGET_TASK.pop(key, None)
+        PENDING_EDIT_TASK.pop(key, None)
+        await message.answer(
+            "Режим программиста выключен.",
+            reply_markup=_keyboard_for_user_scope(chat_id=chat_id, thread_id=thread_id, user_id=user_id),
+        )
+
+    @router.message(lambda m: ((m.text or "").strip() == BTN_DEV_WHERE))
+    async def btn_dev_where(message: Message) -> None:
+        await _show_where(message)
+
+    @router.message(lambda m: ((m.text or "").strip() == BTN_DEV_SCHEDULE))
+    async def btn_dev_schedule(message: Message) -> None:
+        await _show_schedule_info(message)
+
+    @router.message(lambda m: ((m.text or "").strip() == BTN_DEV_CLEAR_SCOPE))
+    async def btn_dev_clear_scope(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        user_id = _user_id_from_message(message)
+        if (chat_id, thread_id, user_id) not in DEV_MODE_SCOPES:
+            await message.answer("Сначала войдите в режим программиста.")
+            return
+        await _handle_clear_scope(message)
+
+    @router.message(lambda m: ((m.text or "").strip() == BTN_DEV_CLEAR_ALL))
+    async def btn_dev_clear_all(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        user_id = _user_id_from_message(message)
+        if (chat_id, thread_id, user_id) not in DEV_MODE_SCOPES:
+            await message.answer("Сначала войдите в режим программиста.")
+            return
+        await message.answer(
+            "Подтвердите полную очистку БД:",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(text="Да, очистить", callback_data=DEV_CLEAR_ALL_CONFIRM_YES),
+                        InlineKeyboardButton(text="Отмена", callback_data=DEV_CLEAR_ALL_CONFIRM_NO),
+                    ]
+                ]
+            ),
+        )
+
+    @router.callback_query(lambda c: (c.data or "") in {DEV_CLEAR_ALL_CONFIRM_YES, DEV_CLEAR_ALL_CONFIRM_NO})
+    async def cb_clear_all_confirm(callback: CallbackQuery) -> None:
+        await callback.answer()
+        message = callback.message
+        if message is None:
+            return
+        if callback.data == DEV_CLEAR_ALL_CONFIRM_NO:
+            await message.answer("Очистка отменена.")
+            return
+
+        deleted_messages, deleted_tasks, deleted_aliases = await asyncio.to_thread(db.clear_all)
+        SUMMARY_MESSAGE_IDS.clear()
+        await message.answer(
+            "🧨 База очищена полностью.\n"
             f"• Сообщений удалено: {deleted_messages}\n"
             f"• Задач удалено: {deleted_tasks}\n"
-            f"• Контекст: chat_id={scope_chat_id}{scope_suffix}\n"
-            "Чтобы очистить все данные сразу, используйте: /clear_db all"
+            f"• Привязок удалено: {deleted_aliases}"
         )
+
+    @router.callback_query(lambda c: (c.data or "").startswith(EDIT_TASK_PICK_PREFIX))
+    async def cb_edit_pick_task(callback: CallbackQuery) -> None:
+        await callback.answer()
+        message = callback.message
+        if message is None or callback.from_user is None:
+            return
+
+        chat_id = message.chat.id
+        thread_id = message.message_thread_id or 0
+        user_id = callback.from_user.id
+        key = (chat_id, thread_id, user_id)
+        token = (callback.data or "")[len(EDIT_TASK_PICK_PREFIX) :]
+
+        options = EDIT_SELECTION_OPTIONS.get(key) or {}
+        external_id = options.get(token)
+        if not external_id:
+            await message.answer("Список задач устарел. Нажмите «Редактировать задачи» еще раз.")
+            return
+
+        EDIT_TARGET_TASK[key] = external_id
+        PENDING_EDIT_TASK.pop(key, None)
+
+        await message.answer(
+            "Выберите поле для редактирования:",
+            reply_markup=_edit_fields_keyboard(),
+        )
+
+    @router.callback_query(lambda c: (c.data or "").startswith(EDIT_FIELD_PREFIX))
+    async def cb_edit_pick_field(callback: CallbackQuery) -> None:
+        await callback.answer()
+        message = callback.message
+        if message is None or callback.from_user is None:
+            return
+
+        chat_id = message.chat.id
+        thread_id = message.message_thread_id or 0
+        user_id = callback.from_user.id
+        key = (chat_id, thread_id, user_id)
+
+        external_id = EDIT_TARGET_TASK.get(key)
+        if not external_id:
+            await message.answer("Сначала выберите задачу через «Редактировать задачи».")
+            return
+
+        field = (callback.data or "")[len(EDIT_FIELD_PREFIX) :]
+        if field == FIELD_STATUS:
+            await message.answer(
+                "Выберите новый статус:",
+                reply_markup=_edit_status_keyboard(),
+            )
+            return
+
+        if field not in {FIELD_TITLE, FIELD_DESCRIPTION, FIELD_DEADLINE, FIELD_AUTHOR, FIELD_ASSIGNEE}:
+            await message.answer("Неизвестное поле редактирования.")
+            return
+
+        PENDING_EDIT_TASK[key] = (external_id, field)
+        prompt = {
+            FIELD_TITLE: "Введите новое название задачи:",
+            FIELD_DESCRIPTION: "Введите новое описание задачи:",
+            FIELD_DEADLINE: "Введите дедлайн в формате YYYY-MM-DD (или '-' чтобы очистить):",
+            FIELD_AUTHOR: "Введите автора задачи:",
+            FIELD_ASSIGNEE: "Введите исполнителя задачи:",
+        }[field]
+        await message.answer(prompt)
+
+    @router.callback_query(lambda c: (c.data or "").startswith(EDIT_STATUS_PREFIX))
+    async def cb_edit_status(callback: CallbackQuery) -> None:
+        await callback.answer()
+        message = callback.message
+        if message is None or callback.from_user is None:
+            return
+
+        chat_id = message.chat.id
+        thread_id = message.message_thread_id or 0
+        user_id = callback.from_user.id
+        key = (chat_id, thread_id, user_id)
+
+        external_id = EDIT_TARGET_TASK.get(key)
+        if not external_id:
+            await message.answer("Сначала выберите задачу через «Редактировать задачи».")
+            return
+
+        code = (callback.data or "")[len(EDIT_STATUS_PREFIX) :]
+        status = CODE_TO_STATUS.get(code)
+        if status is None:
+            await message.answer("Неизвестный статус.")
+            return
+
+        try:
+            updated = await asyncio.to_thread(
+                db.update_task_for_scope,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                external_id=external_id,
+                status=status,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to update status for chat_id=%s thread_id=%s external_id=%s",
+                chat_id,
+                thread_id,
+                external_id,
+            )
+            await message.answer("Не удалось обновить задачу в БД.")
+            return
+
+        if not updated:
+            await message.answer("Задача не найдена или не обновилась. Обновите список задач.")
+            return
+
+        await message.answer(f"Статус обновлен: {_status_icon(status)} {status}")
+
+    @router.callback_query(lambda c: (c.data or "") == EDIT_CANCEL_CALLBACK)
+    async def cb_edit_cancel(callback: CallbackQuery) -> None:
+        await callback.answer()
+        message = callback.message
+        if message is None or callback.from_user is None:
+            return
+        key = (message.chat.id, message.message_thread_id or 0, callback.from_user.id)
+        EDIT_SELECTION_OPTIONS.pop(key, None)
+        EDIT_TARGET_TASK.pop(key, None)
+        PENDING_EDIT_TASK.pop(key, None)
+        await message.answer("Редактирование отменено.")
+
+    @router.message(lambda m: _has_pending_edit(m))
+    async def on_pending_edit_value(message: Message) -> None:
+        chat_id, thread_id = _scope_from_message(message)
+        user_id = _user_id_from_message(message)
+        key = (chat_id, thread_id, user_id)
+        pending = PENDING_EDIT_TASK.get(key)
+        if pending is None:
+            return
+
+        text = (message.text or "").strip()
+        if not text:
+            await message.answer("Нужен текст для обновления поля.")
+            return
+        if text == BTN_EDIT_CANCEL or text.lower() in {"/cancel", "cancel"}:
+            PENDING_EDIT_TASK.pop(key, None)
+            await message.answer("Редактирование отменено.")
+            return
+
+        external_id, field = pending
+        update_kwargs: dict[str, str] = {}
+        if field == FIELD_DEADLINE:
+            normalized = _normalize_deadline_input(text)
+            if normalized is None:
+                await message.answer("Неверный формат даты. Используйте YYYY-MM-DD или '-'.")
+                return
+            update_kwargs[field] = normalized
+        else:
+            update_kwargs[field] = text
+
+        try:
+            updated = await asyncio.to_thread(
+                db.update_task_for_scope,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                external_id=external_id,
+                **update_kwargs,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to update task field %s for chat_id=%s thread_id=%s external_id=%s",
+                field,
+                chat_id,
+                thread_id,
+                external_id,
+            )
+            await message.answer("Не удалось обновить задачу в БД.")
+            return
+
+        if not updated:
+            await message.answer("Задача не найдена или не обновилась. Обновите список задач.")
+            return
+
+        PENDING_EDIT_TASK.pop(key, None)
+        field_label = {
+            FIELD_TITLE: "Название",
+            FIELD_DESCRIPTION: "Описание",
+            FIELD_DEADLINE: "Дедлайн",
+            FIELD_AUTHOR: "Автор",
+            FIELD_ASSIGNEE: "Исполнитель",
+        }.get(field, "Поле")
+        await message.answer(f"{field_label} обновлено.")
 
     @router.message()
     async def collect_messages(message: Message) -> None:
@@ -308,6 +811,11 @@ def build_router(
         if not text:
             return
         if text.startswith("/"):
+            return
+        if text in CONTROL_BUTTON_TEXTS:
+            return
+
+        if message.from_user and message.from_user.is_bot:
             return
 
         chat_id, thread_id = _scope_from_message(message)
@@ -334,6 +842,7 @@ def build_router(
                 thread_id,
             )
             return
+
         await _learn_auto_aliases(
             db=db,
             message=message,
@@ -344,69 +853,143 @@ def build_router(
     return router
 
 
-def _render_status(report: StatusReport) -> str:
-    lines = ["📌 Сводка по ветке"]
-    lines.extend(
-        _render_section(
-            "✅ Что сделано",
-            report.done,
-            "Новых завершенных задач нет.",
+async def _publish_rendered_summary(
+    *,
+    bot: Bot,
+    chat_id: int,
+    thread_id: int,
+    messages: list[RenderedMessage],
+    replace_previous: bool,
+) -> None:
+    if replace_previous:
+        await _delete_previous_summary_messages(bot=bot, chat_id=chat_id, thread_id=thread_id)
+
+    sent_ids: list[int] = []
+    for item in messages:
+        sent = await bot.send_message(
+            chat_id=chat_id,
+            message_thread_id=thread_id or None,
+            text=item.text,
+            parse_mode=item.parse_mode,
         )
-    )
+        sent_ids.append(sent.message_id)
+    SUMMARY_MESSAGE_IDS[(chat_id, thread_id)] = sent_ids
+
+
+async def _delete_previous_summary_messages(*, bot: Bot, chat_id: int, thread_id: int) -> None:
+    key = (chat_id, thread_id)
+    old_ids = SUMMARY_MESSAGE_IDS.pop(key, [])
+    for message_id in old_ids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        except Exception:
+            # Message may be manually deleted or too old for deletion.
+            continue
+
+
+def _startup_text(
+    *,
+    chat_id: int,
+    thread_id: int,
+    target_chat_id: int | None,
+    target_topic_id: int | None,
+    strict_target_scope: bool,
+    include_group_tip: bool,
+) -> str:
+    scope = f"chat_id={chat_id}, topic_id={thread_id}" if thread_id else f"chat_id={chat_id}"
+    lines = [
+        "Привет! Я бот задач.",
+        f"Текущий контекст: {scope}",
+    ]
+
+    if strict_target_scope and target_chat_id is not None:
+        suffix = f", topic_id={target_topic_id}" if target_topic_id else ""
+        lines.append(f"Scope режим: strict (фиксированная цель chat_id={target_chat_id}{suffix}).")
+    else:
+        lines.append("Scope режим: multi-chat (текущий чат/ветка).")
+
     lines.extend(
-        _render_section(
-            "🛠 Что в работе",
-            report.in_progress,
-            "Активных задач не найдено.",
-        )
+        [
+            "",
+            "Основные действия:",
+            f"• {BTN_SUMMARY}",
+            f"• {BTN_EDIT_TASK}",
+            f"• {BTN_HELP}",
+            f"• {BTN_DEV_ENTER}",
+        ]
     )
-    lines.extend(
-        _render_section(
-            "⛔ Что зависло",
-            report.blocked,
-            "Блокеров не найдено.",
+
+    if include_group_tip:
+        lines.extend(
+            [
+                "",
+                "Для сбора контекста в группе отключите Privacy Mode в BotFather: /setprivacy -> Disable.",
+            ]
         )
-    )
-    lines.extend(_render_task_registry(report))
+
     return "\n".join(lines)
 
 
-def _render_status_messages(report: StatusReport) -> list[str]:
-    messages = [_render_summary_message(report)]
-    if not report.tasks:
-        messages.append("📋 Реестр задач\n• Задачи не найдены.")
-        return messages
+def _keyboard_for_user_scope(*, chat_id: int, thread_id: int, user_id: int) -> ReplyKeyboardMarkup:
+    key = (chat_id, thread_id, user_id)
+    if key in DEV_MODE_SCOPES:
+        rows = [
+            [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_EDIT_TASK)],
+            [KeyboardButton(text=BTN_DEV_CLEAR_SCOPE), KeyboardButton(text=BTN_DEV_CLEAR_ALL)],
+            [KeyboardButton(text=BTN_DEV_WHERE), KeyboardButton(text=BTN_DEV_SCHEDULE)],
+            [KeyboardButton(text=BTN_HELP), KeyboardButton(text=BTN_DEV_BACK)],
+        ]
+    else:
+        rows = [
+            [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_EDIT_TASK)],
+            [KeyboardButton(text=BTN_HELP), KeyboardButton(text=BTN_DEV_ENTER)],
+        ]
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
-    ordered_tasks = _ordered_tasks(report)
-    for idx, task in enumerate(ordered_tasks, start=1):
-        messages.append(_render_task_message(task_index=idx, total=len(ordered_tasks), task=task))
-    return messages
+
+def _edit_fields_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="Название", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_TITLE}"),
+                InlineKeyboardButton(text="Описание", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_DESCRIPTION}"),
+            ],
+            [
+                InlineKeyboardButton(text="Дедлайн", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_DEADLINE}"),
+                InlineKeyboardButton(text="Автор", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_AUTHOR}"),
+            ],
+            [
+                InlineKeyboardButton(text="Исполнитель", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_ASSIGNEE}"),
+                InlineKeyboardButton(text="Статус", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_STATUS}"),
+            ],
+            [InlineKeyboardButton(text="Отмена", callback_data=EDIT_CANCEL_CALLBACK)],
+        ]
+    )
+
+
+def _edit_status_keyboard() -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for status in STATUS_ORDER:
+        code = STATUS_TO_CODE[status]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{_status_icon(status)} {status}",
+                    callback_data=f"{EDIT_STATUS_PREFIX}{code}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="Отмена", callback_data=EDIT_CANCEL_CALLBACK)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _render_summary_message(report: StatusReport) -> str:
     lines = ["📌 Сводка по ветке"]
-    lines.extend(
-        _render_section(
-            "✅ Что сделано",
-            report.done,
-            "Новых завершенных задач нет.",
-        )
-    )
-    lines.extend(
-        _render_section(
-            "🛠 Что в работе",
-            report.in_progress,
-            "Активных задач не найдено.",
-        )
-    )
-    lines.extend(
-        _render_section(
-            "⛔ Что зависло",
-            report.blocked,
-            "Блокеров не найдено.",
-        )
-    )
+    lines.extend(_render_section("✅ Что сделано", report.done, "Новых завершенных задач нет."))
+    lines.extend(_render_section("🛠 Что в работе", report.in_progress, "Активных задач не найдено."))
+    lines.extend(_render_section("⛔ Что зависло", report.blocked, "Блокеров не найдено."))
     lines.append("\n📋 Статусы задач:")
+
     if not report.tasks:
         lines.append("• Задач нет.")
     else:
@@ -417,29 +1000,39 @@ def _render_summary_message(report: StatusReport) -> str:
     return "\n".join(lines)
 
 
-def _ordered_tasks(report: StatusReport):
-    ordered = []
+def _render_task_message_html(*, task_index: int, total: int, task: TaskRecord) -> RenderedMessage:
+    description = _trim_text(task.description, limit=1300) or "Не указано"
+    description_html = escape(description).replace("\n", "<br>")
+
+    lines = [
+        f"🧩 <b>Задача {task_index} из {total}</b>",
+        f"📅 Дедлайн: <b>{escape(task.deadline_date or '—')}</b>",
+        "🌐 <b>Основная информация:</b>",
+        f"1. Название: {escape(task.title)}",
+        f"2. Автор: {escape(task.author_name)}",
+        f"3. Исполнитель: {escape(task.assignee)}",
+        f"4. Статус: {_status_icon(task.status)} {escape(task.status)}",
+        f"5. ID: {escape(task.external_id)}",
+        "6. Описание:",
+        f"<blockquote>{description_html}</blockquote>",
+    ]
+    return RenderedMessage(text="\n".join(lines), parse_mode="HTML")
+
+
+def _ordered_tasks(report: StatusReport) -> list[TaskRecord]:
+    ordered: list[TaskRecord] = []
     for status in STATUS_ORDER:
         status_tasks = [task for task in report.tasks if task.status == status]
         ordered.extend(status_tasks)
     return ordered
 
 
-def _render_task_message(*, task_index: int, total: int, task) -> str:
-    description = _trim_text(task.description, limit=900) or "Не указано"
-    lines = [
-        f"🧩 Задача {task_index} из {total}",
-        f"📅 Дедлайн: {task.deadline_date or '—'}",
-        "🌐 Основная информация:",
-        f"1. Название: {task.title}",
-        f"2. Автор: {task.author_name}",
-        f"3. Исполнитель: {task.assignee}",
-        f"4. Статус: {_status_icon(task.status)} {task.status}",
-        f"5. ID: {task.external_id}",
-        "6. Описание:",
-        f"«{description}»",
-    ]
-    return "\n".join(lines)
+def _task_sort_key(task: TaskRecord) -> tuple[int, str]:
+    try:
+        order = STATUS_ORDER.index(task.status)
+    except ValueError:
+        order = len(STATUS_ORDER)
+    return order, task.title.lower()
 
 
 def _trim_text(text: str, *, limit: int) -> str:
@@ -454,33 +1047,8 @@ def _render_section(title: str, items: list[str], empty_text: str) -> list[str]:
     if not items:
         lines.append(f"• {empty_text}")
         return lines
-
     for idx, item in enumerate(items, start=1):
         lines.append(f"{idx}. {item}")
-    return lines
-
-
-def _render_task_registry(report: StatusReport) -> list[str]:
-    lines = ["\n📋 Реестр задач"]
-    if not report.tasks:
-        lines.append("• Задачи не найдены.")
-        return lines
-
-    for status in STATUS_ORDER:
-        status_tasks = [task for task in report.tasks if task.status == status]
-        if not status_tasks:
-            continue
-        lines.append(f"\n{_status_icon(status)} {status} ({len(status_tasks)})")
-        for idx, task in enumerate(status_tasks, start=1):
-            lines.append(f"{idx}. {task.title}")
-            lines.append(f"   🆔 {task.external_id}")
-            lines.append(f"   📅 Дедлайн: {task.deadline_date or '—'}")
-            lines.append(f"   👤 Автор: {task.author_name}")
-            lines.append(f"   👷 Исполнитель: {task.assignee}")
-            lines.append(f"   🏷 Статус: {task.status}")
-            if task.description:
-                lines.append("   📝 Описание:")
-                lines.append(f"   └ {task.description}")
     return lines
 
 
@@ -513,23 +1081,10 @@ def _scope_from_message(message: Message) -> tuple[int, int]:
     return message.chat.id, message.message_thread_id or 0
 
 
-def _is_scope_allowed(
-    *,
-    chat_id: int,
-    thread_id: int,
-    target_chat_id: int | None,
-    target_topic_id: int | None,
-    strict_target_scope: bool,
-) -> bool:
-    if not strict_target_scope:
-        return True
-    if target_chat_id is None:
-        return True
-    if chat_id != target_chat_id:
-        return False
-    if target_topic_id is None:
-        return True
-    return thread_id == target_topic_id
+def _user_id_from_message(message: Message) -> int:
+    if message.from_user is None:
+        return 0
+    return message.from_user.id
 
 
 def _command_argument(message: Message) -> str:
@@ -542,6 +1097,15 @@ def _command_argument(message: Message) -> str:
 
 def _normalize_alias(raw: str) -> str:
     return " ".join(raw.strip().lower().split())
+
+
+def _normalize_deadline_input(raw: str) -> str | None:
+    value = raw.strip()
+    if value in {"", "-", "—", "none", "null", "без дедлайна"}:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return value
+    return None
 
 
 async def _learn_auto_aliases(
@@ -667,6 +1231,24 @@ def _extract_topic_name(message: Message) -> str:
     return ""
 
 
+def _has_pending_edit(message: Message) -> bool:
+    if message.from_user is None:
+        return False
+    text = (message.text or "").strip()
+    if text.startswith("/") and text.lower() not in {"/cancel"}:
+        return False
+    key = (message.chat.id, message.message_thread_id or 0, message.from_user.id)
+    return key in PENDING_EDIT_TASK
+
+
+def _is_bot_connected_to_chat(event: ChatMemberUpdated) -> bool:
+    old_status = getattr(event.old_chat_member, "status", None)
+    new_status = getattr(event.new_chat_member, "status", None)
+    if new_status in {"left", "kicked"}:
+        return False
+    return old_status in {"left", "kicked"} and new_status in {"member", "administrator"}
+
+
 def _humanize_llm_error(exc: Exception) -> str:
     text = str(exc).lower()
     if (
@@ -711,4 +1293,6 @@ def _humanize_llm_error(exc: Exception) -> str:
             "Amvera вернул 400 Bad Request. "
             "Проверьте AMVERA_LLM_MODEL и API-ключ (теперь детали есть в логах)."
         )
+    if "operationalerror" in text or "ssl error" in text:
+        return "Временная ошибка соединения с БД. Повторите запрос через несколько секунд."
     return "Не удалось получить сводку от LLM. Попробуйте чуть позже."

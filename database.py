@@ -65,6 +65,28 @@ class _DatabaseBackend(Protocol):
         limit: int,
     ) -> list[StoredMessage]: ...
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None: ...
+    def replace_tasks_for_scope(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        tasks: Sequence[TaskRecord],
+    ) -> None: ...
+    def get_tasks_for_scope(self, *, chat_id: int, thread_id: int) -> list[TaskRecord]: ...
+    def update_task_for_scope(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        deadline_date: str | None = None,
+        author_name: str | None = None,
+        assignee: str | None = None,
+        status: str | None = None,
+    ) -> bool: ...
+    def list_message_scopes(self) -> list[tuple[int, int]]: ...
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]: ...
     def clear_all(self) -> tuple[int, int, int]: ...
     def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None: ...
@@ -124,6 +146,15 @@ class _SQLiteBackend:
                 self._ensure_column("tasks", "deadline_date", "TEXT NOT NULL DEFAULT ''")
                 self._ensure_column("tasks", "author_name", "TEXT NOT NULL DEFAULT ''")
                 self._ensure_column("tasks", "assignee", "TEXT NOT NULL DEFAULT ''")
+                self._ensure_column("tasks", "scope_chat_id", "INTEGER NOT NULL DEFAULT 0")
+                self._ensure_column("tasks", "scope_thread_id", "INTEGER NOT NULL DEFAULT 0")
+                self._ensure_column("tasks", "public_id", "TEXT NOT NULL DEFAULT ''")
+                self.conn.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tasks_scope
+                    ON tasks(scope_chat_id, scope_thread_id, updated_at)
+                    """
+                )
                 self.conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS scope_aliases (
@@ -228,6 +259,160 @@ class _SQLiteBackend:
                         ),
                     )
 
+    def replace_tasks_for_scope(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        tasks: Sequence[TaskRecord],
+    ) -> None:
+        with self._lock:
+            with self.conn:
+                self.conn.execute(
+                    """
+                    DELETE FROM tasks
+                    WHERE scope_chat_id = ? AND scope_thread_id = ?
+                    """,
+                    (chat_id, thread_id),
+                )
+                for task in tasks:
+                    if task.status not in VALID_STATUSES:
+                        continue
+                    public_id = (task.external_id or "").strip() or "T"
+                    internal_id = f"{chat_id}:{thread_id}:{public_id}"
+                    self.conn.execute(
+                        """
+                        INSERT INTO tasks (
+                            external_id,
+                            title,
+                            description,
+                            deadline_date,
+                            author_name,
+                            assignee,
+                            status,
+                            scope_chat_id,
+                            scope_thread_id,
+                            public_id
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(external_id) DO UPDATE SET
+                            title = excluded.title,
+                            description = excluded.description,
+                            deadline_date = excluded.deadline_date,
+                            author_name = excluded.author_name,
+                            assignee = excluded.assignee,
+                            status = excluded.status,
+                            scope_chat_id = excluded.scope_chat_id,
+                            scope_thread_id = excluded.scope_thread_id,
+                            public_id = excluded.public_id,
+                            updated_at = CURRENT_TIMESTAMP
+                        """,
+                        (
+                            internal_id,
+                            task.title,
+                            task.description,
+                            task.deadline_date,
+                            task.author_name,
+                            task.assignee,
+                            task.status,
+                            chat_id,
+                            thread_id,
+                            public_id,
+                        ),
+                    )
+
+    def get_tasks_for_scope(self, *, chat_id: int, thread_id: int) -> list[TaskRecord]:
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT
+                    COALESCE(NULLIF(public_id, ''), external_id) AS external_id,
+                    title,
+                    description,
+                    deadline_date,
+                    author_name,
+                    assignee,
+                    status
+                FROM tasks
+                WHERE scope_chat_id = ? AND scope_thread_id = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (chat_id, thread_id),
+            ).fetchall()
+        return [
+            TaskRecord(
+                external_id=row["external_id"],
+                title=row["title"],
+                description=row["description"],
+                deadline_date=row["deadline_date"],
+                author_name=row["author_name"],
+                assignee=row["assignee"],
+                status=row["status"],
+            )
+            for row in rows
+        ]
+
+    def update_task_for_scope(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        deadline_date: str | None = None,
+        author_name: str | None = None,
+        assignee: str | None = None,
+        status: str | None = None,
+    ) -> bool:
+        assignments: list[str] = []
+        values: list[object] = []
+        if title is not None:
+            assignments.append("title = ?")
+            values.append(title)
+        if description is not None:
+            assignments.append("description = ?")
+            values.append(description)
+        if deadline_date is not None:
+            assignments.append("deadline_date = ?")
+            values.append(deadline_date)
+        if author_name is not None:
+            assignments.append("author_name = ?")
+            values.append(author_name)
+        if assignee is not None:
+            assignments.append("assignee = ?")
+            values.append(assignee)
+        if status is not None:
+            if status not in VALID_STATUSES:
+                return False
+            assignments.append("status = ?")
+            values.append(status)
+        if not assignments:
+            return False
+
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        values.extend([chat_id, thread_id, external_id])
+        sql = (
+            f"UPDATE tasks SET {', '.join(assignments)} "
+            "WHERE scope_chat_id = ? AND scope_thread_id = ? AND public_id = ?"
+        )
+        with self._lock:
+            with self.conn:
+                cur = self.conn.execute(sql, tuple(values))
+                updated = cur.rowcount
+        return updated > 0
+
+    def list_message_scopes(self) -> list[tuple[int, int]]:
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT DISTINCT chat_id, thread_id
+                FROM messages
+                ORDER BY chat_id, thread_id
+                """
+            ).fetchall()
+        return [(int(row["chat_id"]), int(row["thread_id"])) for row in rows]
+
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
         with self._lock:
             with self.conn:
@@ -239,7 +424,13 @@ class _SQLiteBackend:
                     (chat_id, thread_id),
                 )
                 deleted_messages = max(0, cur_messages.rowcount)
-                cur_tasks = self.conn.execute("DELETE FROM tasks")
+                cur_tasks = self.conn.execute(
+                    """
+                    DELETE FROM tasks
+                    WHERE scope_chat_id = ? AND scope_thread_id = ?
+                    """,
+                    (chat_id, thread_id),
+                )
                 deleted_tasks = max(0, cur_tasks.rowcount)
         return deleted_messages, deleted_tasks
 
@@ -426,6 +617,30 @@ class _PostgresBackend:
                 )
                 cur.execute(
                     """
+                    ALTER TABLE tasks
+                    ADD COLUMN IF NOT EXISTS scope_chat_id BIGINT NOT NULL DEFAULT 0
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN IF NOT EXISTS scope_thread_id BIGINT NOT NULL DEFAULT 0
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN IF NOT EXISTS public_id TEXT NOT NULL DEFAULT ''
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_tasks_scope
+                    ON tasks(scope_chat_id, scope_thread_id, updated_at)
+                    """
+                )
+                cur.execute(
+                    """
                     CREATE TABLE IF NOT EXISTS scope_aliases (
                         alias TEXT PRIMARY KEY,
                         chat_id BIGINT NOT NULL,
@@ -529,6 +744,173 @@ class _PostgresBackend:
                         )
         self._run_with_reconnect("replace_tasks", _op)
 
+    def replace_tasks_for_scope(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        tasks: Sequence[TaskRecord],
+    ) -> None:
+        def _op() -> None:
+            with self.conn.transaction():
+                with self.conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        DELETE FROM tasks
+                        WHERE scope_chat_id = %s AND scope_thread_id = %s
+                        """,
+                        (chat_id, thread_id),
+                    )
+                    for task in tasks:
+                        if task.status not in VALID_STATUSES:
+                            continue
+                        public_id = (task.external_id or "").strip() or "T"
+                        internal_id = f"{chat_id}:{thread_id}:{public_id}"
+                        cur.execute(
+                            """
+                            INSERT INTO tasks (
+                                external_id,
+                                title,
+                                description,
+                                deadline_date,
+                                author_name,
+                                assignee,
+                                status,
+                                scope_chat_id,
+                                scope_thread_id,
+                                public_id
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (external_id) DO UPDATE SET
+                                title = EXCLUDED.title,
+                                description = EXCLUDED.description,
+                                deadline_date = EXCLUDED.deadline_date,
+                                author_name = EXCLUDED.author_name,
+                                assignee = EXCLUDED.assignee,
+                                status = EXCLUDED.status,
+                                scope_chat_id = EXCLUDED.scope_chat_id,
+                                scope_thread_id = EXCLUDED.scope_thread_id,
+                                public_id = EXCLUDED.public_id,
+                                updated_at = CURRENT_TIMESTAMP
+                            """,
+                            (
+                                internal_id,
+                                task.title,
+                                task.description,
+                                task.deadline_date,
+                                task.author_name,
+                                task.assignee,
+                                task.status,
+                                chat_id,
+                                thread_id,
+                                public_id,
+                            ),
+                        )
+
+        self._run_with_reconnect("replace_tasks_for_scope", _op)
+
+    def get_tasks_for_scope(self, *, chat_id: int, thread_id: int) -> list[TaskRecord]:
+        def _op():
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(NULLIF(public_id, ''), external_id) AS external_id,
+                        title,
+                        description,
+                        deadline_date,
+                        author_name,
+                        assignee,
+                        status
+                    FROM tasks
+                    WHERE scope_chat_id = %s AND scope_thread_id = %s
+                    ORDER BY updated_at DESC, id DESC
+                    """,
+                    (chat_id, thread_id),
+                )
+                return cur.fetchall()
+
+        rows = self._run_with_reconnect("get_tasks_for_scope", _op)
+        return [
+            TaskRecord(
+                external_id=row["external_id"],
+                title=row["title"],
+                description=row["description"],
+                deadline_date=row["deadline_date"],
+                author_name=row["author_name"],
+                assignee=row["assignee"],
+                status=row["status"],
+            )
+            for row in rows
+        ]
+
+    def update_task_for_scope(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        deadline_date: str | None = None,
+        author_name: str | None = None,
+        assignee: str | None = None,
+        status: str | None = None,
+    ) -> bool:
+        assignments: list[str] = []
+        values: list[object] = []
+        if title is not None:
+            assignments.append("title = %s")
+            values.append(title)
+        if description is not None:
+            assignments.append("description = %s")
+            values.append(description)
+        if deadline_date is not None:
+            assignments.append("deadline_date = %s")
+            values.append(deadline_date)
+        if author_name is not None:
+            assignments.append("author_name = %s")
+            values.append(author_name)
+        if assignee is not None:
+            assignments.append("assignee = %s")
+            values.append(assignee)
+        if status is not None:
+            if status not in VALID_STATUSES:
+                return False
+            assignments.append("status = %s")
+            values.append(status)
+        if not assignments:
+            return False
+
+        assignments.append("updated_at = CURRENT_TIMESTAMP")
+        values.extend([chat_id, thread_id, external_id])
+        sql = (
+            f"UPDATE tasks SET {', '.join(assignments)} "
+            "WHERE scope_chat_id = %s AND scope_thread_id = %s AND public_id = %s"
+        )
+
+        def _op() -> bool:
+            with self.conn.cursor() as cur:
+                cur.execute(sql, tuple(values))
+                return cur.rowcount > 0
+
+        return self._run_with_reconnect("update_task_for_scope", _op)
+
+    def list_message_scopes(self) -> list[tuple[int, int]]:
+        def _op():
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT chat_id, thread_id
+                    FROM messages
+                    ORDER BY chat_id, thread_id
+                    """
+                )
+                return cur.fetchall()
+
+        rows = self._run_with_reconnect("list_message_scopes", _op)
+        return [(int(row["chat_id"]), int(row["thread_id"])) for row in rows]
+
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
         def _op() -> tuple[int, int]:
             with self.conn.transaction():
@@ -541,7 +923,13 @@ class _PostgresBackend:
                         (chat_id, thread_id),
                     )
                     deleted_messages = max(0, cur.rowcount)
-                    cur.execute("DELETE FROM tasks")
+                    cur.execute(
+                        """
+                        DELETE FROM tasks
+                        WHERE scope_chat_id = %s AND scope_thread_id = %s
+                        """,
+                        (chat_id, thread_id),
+                    )
                     deleted_tasks = max(0, cur.rowcount)
             return deleted_messages, deleted_tasks
         return self._run_with_reconnect("clear_scope", _op)
@@ -694,6 +1082,50 @@ class Database:
 
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None:
         self._backend.replace_tasks(tasks)
+
+    def replace_tasks_for_scope(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        tasks: Sequence[TaskRecord],
+    ) -> None:
+        self._backend.replace_tasks_for_scope(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            tasks=tasks,
+        )
+
+    def get_tasks_for_scope(self, *, chat_id: int, thread_id: int) -> list[TaskRecord]:
+        return self._backend.get_tasks_for_scope(chat_id=chat_id, thread_id=thread_id)
+
+    def update_task_for_scope(
+        self,
+        *,
+        chat_id: int,
+        thread_id: int,
+        external_id: str,
+        title: str | None = None,
+        description: str | None = None,
+        deadline_date: str | None = None,
+        author_name: str | None = None,
+        assignee: str | None = None,
+        status: str | None = None,
+    ) -> bool:
+        return self._backend.update_task_for_scope(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            external_id=external_id,
+            title=title,
+            description=description,
+            deadline_date=deadline_date,
+            author_name=author_name,
+            assignee=assignee,
+            status=status,
+        )
+
+    def list_message_scopes(self) -> list[tuple[int, int]]:
+        return self._backend.list_message_scopes()
 
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
         return self._backend.clear_scope(chat_id=chat_id, thread_id=thread_id)

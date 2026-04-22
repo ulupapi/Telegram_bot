@@ -5,7 +5,10 @@ import builtins
 import contextlib
 import logging
 import os
+import re
 from dataclasses import dataclass
+from datetime import datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
@@ -78,7 +81,7 @@ def _install_runtime_compat_shims() -> None:
 
 _install_runtime_compat_shims()
 
-from handlers import build_router
+from handlers import build_and_publish_scope_summary, build_router
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,10 @@ class Settings:
     sqlite_path: str
     context_messages_limit: int
     llm_timeout_seconds: int
+    schedule_enabled: bool
+    summary_morning_time: str
+    summary_evening_time: str
+    schedule_timezone: str
 
 
 def load_settings() -> Settings:
@@ -151,6 +158,15 @@ def load_settings() -> Settings:
         sqlite_path=os.getenv("SQLITE_PATH", "data/bot.db"),
         context_messages_limit=int(os.getenv("CONTEXT_MESSAGES_LIMIT", "120")),
         llm_timeout_seconds=int(os.getenv("LLM_TIMEOUT_SECONDS", "120")),
+        schedule_enabled=parse_bool("SCHEDULE_ENABLED", default=False),
+        summary_morning_time=os.getenv("SUMMARY_MORNING_TIME", "09:00").strip(),
+        summary_evening_time=os.getenv("SUMMARY_EVENING_TIME", "18:00").strip(),
+        schedule_timezone=(
+            os.getenv("SCHEDULE_TIMEZONE")
+            or os.getenv("TIMEZONE")
+            or os.getenv("TZ")
+            or "Europe/Moscow"
+        ).strip(),
     )
 
 
@@ -231,6 +247,22 @@ async def main() -> None:
 
     await _configure_bot_commands(bot)
 
+    if settings.schedule_enabled:
+        scheduler_task = asyncio.create_task(
+            _scheduled_summary_loop(
+                bot=bot,
+                db=db,
+                extractor=extractor,
+                settings=settings,
+            )
+        )
+        logging.getLogger(__name__).info(
+            "Scheduled summaries enabled: morning=%s evening=%s timezone=%s",
+            settings.summary_morning_time,
+            settings.summary_evening_time,
+            settings.schedule_timezone,
+        )
+
     try:
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
@@ -240,6 +272,109 @@ async def main() -> None:
                 await scheduler_task
         db.close()
         await bot.session.close()
+
+
+def _parse_schedule_time(raw: str, *, fallback: str) -> time:
+    value = (raw or "").strip() or fallback
+    if not re.fullmatch(r"\d{2}:\d{2}", value):
+        value = fallback
+    hour, minute = value.split(":", maxsplit=1)
+    hh = max(0, min(23, int(hour)))
+    mm = max(0, min(59, int(minute)))
+    return time(hour=hh, minute=mm)
+
+
+def _next_schedule_moment(now: datetime, schedule_points: tuple[time, time]) -> datetime:
+    candidates: list[datetime] = []
+    for point in schedule_points:
+        candidate = now.replace(
+            hour=point.hour,
+            minute=point.minute,
+            second=0,
+            microsecond=0,
+        )
+        if candidate <= now:
+            candidate = candidate + timedelta(days=1)
+        candidates.append(candidate)
+    return min(candidates)
+
+
+async def _run_scheduled_summaries(
+    *,
+    bot: Bot,
+    db: Database,
+    extractor: AIExtractor,
+    settings: Settings,
+) -> None:
+    logger = logging.getLogger(__name__)
+    if settings.strict_target_scope and settings.target_chat_id is not None:
+        scopes = [(settings.target_chat_id, settings.target_topic_id or 0)]
+    else:
+        try:
+            scopes = await asyncio.to_thread(db.list_message_scopes)
+        except Exception:
+            logger.exception("Failed to list DB scopes for scheduled summary")
+            return
+
+    if not scopes:
+        logger.info("No known scopes for scheduled summary run")
+        return
+
+    logger.info("Scheduled summary run started for %s scope(s)", len(scopes))
+    sent_count = 0
+    for chat_id, thread_id in scopes:
+        try:
+            sent = await build_and_publish_scope_summary(
+                bot=bot,
+                db=db,
+                extractor=extractor,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                context_messages_limit=settings.context_messages_limit,
+                replace_previous=True,
+            )
+            if sent:
+                sent_count += 1
+        except Exception:
+            logger.exception(
+                "Scheduled summary failed for chat_id=%s thread_id=%s",
+                chat_id,
+                thread_id,
+            )
+    logger.info("Scheduled summary run finished: %s/%s scope(s) sent", sent_count, len(scopes))
+
+
+async def _scheduled_summary_loop(
+    *,
+    bot: Bot,
+    db: Database,
+    extractor: AIExtractor,
+    settings: Settings,
+) -> None:
+    logger = logging.getLogger(__name__)
+    tz_name = settings.schedule_timezone or "Europe/Moscow"
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        logger.warning("Unknown timezone %s; fallback to Europe/Moscow", tz_name)
+        tz = ZoneInfo("Europe/Moscow")
+
+    morning = _parse_schedule_time(settings.summary_morning_time, fallback="09:00")
+    evening = _parse_schedule_time(settings.summary_evening_time, fallback="18:00")
+    schedule_points = (morning, evening)
+
+    while True:
+        now = datetime.now(tz)
+        next_run = _next_schedule_moment(now, schedule_points)
+        wait_seconds = max(1, int((next_run - now).total_seconds()))
+        logger.info("Next scheduled summary at %s", next_run.isoformat())
+        await asyncio.sleep(wait_seconds)
+        await _run_scheduled_summaries(
+            bot=bot,
+            db=db,
+            extractor=extractor,
+            settings=settings,
+        )
 
 
 def _load_bot_command_types():
@@ -277,7 +412,9 @@ async def _configure_bot_commands(bot: Bot) -> None:
     ) = command_types
 
     commands = [
+        BotCommandType(command="start", description="Показать главное меню с кнопками"),
         BotCommandType(command="status", description="Сводка: сделано / в работе / зависло"),
+        BotCommandType(command="edit", description="Ручное редактирование задач"),
         BotCommandType(command="bind", description="Привязать имя к текущему чату/ветке"),
         BotCommandType(command="where", description="Показать текущий chat_id/topic_id"),
         BotCommandType(command="health", description="Проверка доступа в текущем чате"),
@@ -302,6 +439,13 @@ async def _configure_bot_commands(bot: Bot) -> None:
 
 def _log_llm_runtime_settings(settings: Settings) -> None:
     logger = logging.getLogger(__name__)
+    logger.info(
+        "Schedule enabled=%s morning=%s evening=%s timezone=%s",
+        settings.schedule_enabled,
+        settings.summary_morning_time,
+        settings.summary_evening_time,
+        settings.schedule_timezone,
+    )
     provider = settings.llm_provider
     if provider == "openai":
         base_url = settings.openai_base_url or "https://api.openai.com/v1 (default)"
