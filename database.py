@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Callable, Protocol, Sequence, TypeVar
 
 try:
     import psycopg
@@ -21,6 +22,9 @@ VALID_STATUSES = {
     "Отклонена",
     "Отозвана",
 }
+
+logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -324,11 +328,42 @@ class _PostgresBackend:
             raise RuntimeError(
                 "PostgreSQL backend selected, but psycopg is not installed."
             )
+        self._dsn = dsn
         self._lock = threading.RLock()
-        self.conn = psycopg.connect(dsn, autocommit=True)
+        self.conn = self._connect()
+
+    def _connect(self):
+        return psycopg.connect(self._dsn, autocommit=True)
+
+    def _is_connection_error(self, exc: Exception) -> bool:
+        return isinstance(exc, (psycopg.OperationalError, psycopg.InterfaceError))
+
+    def _reconnect_locked(self) -> None:
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        self.conn = self._connect()
+
+    def _run_with_reconnect(self, op_name: str, fn: Callable[[], T]) -> T:
+        with self._lock:
+            max_attempts = 2
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return fn()
+                except Exception as exc:
+                    if attempt >= max_attempts or not self._is_connection_error(exc):
+                        raise
+                    logger.warning(
+                        "Postgres connection error during %s: %s. Reconnecting and retrying.",
+                        op_name,
+                        exc,
+                    )
+                    self._reconnect_locked()
+        raise RuntimeError("unreachable")
 
     def init_schema(self) -> None:
-        with self._lock:
+        def _op() -> None:
             with self.conn.cursor() as cur:
                 cur.execute(
                     """
@@ -400,6 +435,7 @@ class _PostgresBackend:
                     )
                     """
                 )
+        self._run_with_reconnect("init_schema", _op)
 
     def save_message(
         self,
@@ -415,7 +451,7 @@ class _PostgresBackend:
         if not clean_text:
             return
 
-        with self._lock:
+        def _op() -> None:
             with self.conn.cursor() as cur:
                 cur.execute(
                     """
@@ -426,6 +462,7 @@ class _PostgresBackend:
                     """,
                     (chat_id, thread_id, message_id, user_name, clean_text, created_at),
                 )
+        self._run_with_reconnect("save_message", _op)
 
     def get_recent_thread_messages(
         self,
@@ -434,7 +471,7 @@ class _PostgresBackend:
         thread_id: int,
         limit: int,
     ) -> list[StoredMessage]:
-        with self._lock:
+        def _op():
             with self.conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
@@ -446,7 +483,9 @@ class _PostgresBackend:
                     """,
                     (chat_id, thread_id, limit),
                 )
-                rows = cur.fetchall()
+                return cur.fetchall()
+
+        rows = self._run_with_reconnect("get_recent_thread_messages", _op)
 
         return [
             StoredMessage(
@@ -458,7 +497,7 @@ class _PostgresBackend:
         ]
 
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None:
-        with self._lock:
+        def _op() -> None:
             with self.conn.transaction():
                 with self.conn.cursor() as cur:
                     cur.execute("DELETE FROM tasks")
@@ -488,9 +527,10 @@ class _PostgresBackend:
                                 task.status,
                             ),
                         )
+        self._run_with_reconnect("replace_tasks", _op)
 
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
-        with self._lock:
+        def _op() -> tuple[int, int]:
             with self.conn.transaction():
                 with self.conn.cursor() as cur:
                     cur.execute(
@@ -503,10 +543,11 @@ class _PostgresBackend:
                     deleted_messages = max(0, cur.rowcount)
                     cur.execute("DELETE FROM tasks")
                     deleted_tasks = max(0, cur.rowcount)
-        return deleted_messages, deleted_tasks
+            return deleted_messages, deleted_tasks
+        return self._run_with_reconnect("clear_scope", _op)
 
     def clear_all(self) -> tuple[int, int, int]:
-        with self._lock:
+        def _op() -> tuple[int, int, int]:
             with self.conn.transaction():
                 with self.conn.cursor() as cur:
                     cur.execute("DELETE FROM messages")
@@ -515,14 +556,15 @@ class _PostgresBackend:
                     deleted_tasks = max(0, cur.rowcount)
                     cur.execute("DELETE FROM scope_aliases")
                     deleted_aliases = max(0, cur.rowcount)
-        return deleted_messages, deleted_tasks, deleted_aliases
+            return deleted_messages, deleted_tasks, deleted_aliases
+        return self._run_with_reconnect("clear_all", _op)
 
     def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None:
         clean_alias = alias.strip().lower()
         if not clean_alias:
             return
 
-        with self._lock:
+        def _op() -> None:
             with self.conn.cursor() as cur:
                 cur.execute(
                     """
@@ -541,13 +583,14 @@ class _PostgresBackend:
                     """,
                     (clean_alias, chat_id, thread_id),
                 )
+        self._run_with_reconnect("learn_scope_alias", _op)
 
     def set_manual_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None:
         clean_alias = alias.strip().lower()
         if not clean_alias:
             return
 
-        with self._lock:
+        def _op() -> None:
             with self.conn.cursor() as cur:
                 cur.execute(
                     """
@@ -561,13 +604,14 @@ class _PostgresBackend:
                     """,
                     (clean_alias, chat_id, thread_id),
                 )
+        self._run_with_reconnect("set_manual_scope_alias", _op)
 
     def resolve_scope_alias(self, *, alias: str) -> tuple[int, int] | None:
         clean_alias = alias.strip().lower()
         if not clean_alias:
             return None
 
-        with self._lock:
+        def _op():
             with self.conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
                     """
@@ -577,7 +621,9 @@ class _PostgresBackend:
                     """,
                     (clean_alias,),
                 )
-                row = cur.fetchone()
+                return cur.fetchone()
+
+        row = self._run_with_reconnect("resolve_scope_alias", _op)
         if row is None:
             return None
         return int(row["chat_id"]), int(row["thread_id"])

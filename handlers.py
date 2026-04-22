@@ -226,12 +226,23 @@ def build_router(
             return
         scope_chat_id, scope_thread_id = scope
 
-        rows = await asyncio.to_thread(
-            db.get_recent_thread_messages,
-            chat_id=scope_chat_id,
-            thread_id=scope_thread_id,
-            limit=context_messages_limit,
-        )
+        try:
+            rows = await asyncio.to_thread(
+                db.get_recent_thread_messages,
+                chat_id=scope_chat_id,
+                thread_id=scope_thread_id,
+                limit=context_messages_limit,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to load context messages for chat_id=%s thread_id=%s",
+                scope_chat_id,
+                scope_thread_id,
+            )
+            await message.answer(
+                "Временная ошибка доступа к базе данных. Попробуйте повторить через 5-10 секунд."
+            )
+            return
         if not rows:
             await message.answer(
                 _empty_context_hint(message=message, scope_thread_id=scope_thread_id)
@@ -306,15 +317,23 @@ def build_router(
         author = _telegram_author(message)
         created_at = message.date.replace(tzinfo=timezone.utc).isoformat()
 
-        await asyncio.to_thread(
-            db.save_message,
-            chat_id=chat_id,
-            thread_id=thread_id,
-            message_id=message.message_id,
-            user_name=author,
-            text=text,
-            created_at=created_at,
-        )
+        try:
+            await asyncio.to_thread(
+                db.save_message,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                message_id=message.message_id,
+                user_name=author,
+                text=text,
+                created_at=created_at,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to save incoming message for chat_id=%s thread_id=%s",
+                chat_id,
+                thread_id,
+            )
+            return
         await _learn_auto_aliases(
             db=db,
             message=message,
@@ -535,22 +554,37 @@ async def _learn_auto_aliases(
     if thread_id == 0:
         chat_title = (message.chat.title or "").strip()
         if chat_title:
-            await asyncio.to_thread(
-                db.learn_scope_alias,
-                alias=_normalize_alias(chat_title),
-                chat_id=chat_id,
-                thread_id=0,
-            )
+            try:
+                await asyncio.to_thread(
+                    db.learn_scope_alias,
+                    alias=_normalize_alias(chat_title),
+                    chat_id=chat_id,
+                    thread_id=0,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to learn chat alias for chat_id=%s title=%r",
+                    chat_id,
+                    chat_title,
+                )
         return
 
     topic_name = _extract_topic_name(message)
     if topic_name:
-        await asyncio.to_thread(
-            db.learn_scope_alias,
-            alias=_normalize_alias(topic_name),
-            chat_id=chat_id,
-            thread_id=thread_id,
-        )
+        try:
+            await asyncio.to_thread(
+                db.learn_scope_alias,
+                alias=_normalize_alias(topic_name),
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to learn topic alias for chat_id=%s thread_id=%s topic=%r",
+                chat_id,
+                thread_id,
+                topic_name,
+            )
 
 
 async def _resolve_scope_from_message_or_alias(
@@ -563,16 +597,35 @@ async def _resolve_scope_from_message_or_alias(
     alias_raw: str,
 ) -> tuple[int, int] | None:
     current_chat_id, current_thread_id = _scope_from_message(message)
-    await _learn_auto_aliases(
-        db=db,
-        message=message,
-        chat_id=current_chat_id,
-        thread_id=current_thread_id,
-    )
+    try:
+        await _learn_auto_aliases(
+            db=db,
+            message=message,
+            chat_id=current_chat_id,
+            thread_id=current_thread_id,
+        )
+    except Exception:
+        logger.exception(
+            "Unexpected alias learning failure for chat_id=%s thread_id=%s",
+            current_chat_id,
+            current_thread_id,
+        )
 
     if alias_raw:
         alias = _normalize_alias(alias_raw)
-        resolved = await asyncio.to_thread(db.resolve_scope_alias, alias=alias)
+        try:
+            resolved = await asyncio.to_thread(db.resolve_scope_alias, alias=alias)
+        except Exception:
+            logger.exception(
+                "Failed to resolve alias %r in DB for chat_id=%s thread_id=%s",
+                alias,
+                current_chat_id,
+                current_thread_id,
+            )
+            await message.answer(
+                "Временная ошибка доступа к базе данных. Попробуйте повторить через 5-10 секунд."
+            )
+            return None
         if not resolved:
             await message.answer(
                 f"Не нашел цель «{alias_raw}». "
