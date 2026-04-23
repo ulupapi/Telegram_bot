@@ -300,14 +300,14 @@ def build_router(
             f"• Контекст: chat_id={scope_chat_id}{scope_suffix}"
         )
 
-    async def _show_saved_tasks(message: Message) -> None:
+    async def _show_saved_tasks(message: Message, alias_raw: str = "") -> None:
         scope = await _resolve_scope_from_message_or_alias(
             message=message,
             db=db,
             target_chat_id=target_chat_id,
             target_topic_id=target_topic_id,
             strict_target_scope=strict_target_scope,
-            alias_raw=_command_argument(message),
+            alias_raw=alias_raw,
         )
         if scope is None:
             return
@@ -623,7 +623,7 @@ def build_router(
 
     @router.message(CommandFilter("tasks"))
     async def cmd_tasks(message: Message) -> None:
-        await _show_saved_tasks(message)
+        await _show_saved_tasks(message, _command_argument(message))
 
     @router.message(CommandFilter("status"))
     async def cmd_status(message: Message) -> None:
