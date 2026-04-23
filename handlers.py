@@ -83,7 +83,8 @@ def _all_control_button_texts() -> set[str]:
 DEV_MODE_SCOPES: set[tuple[int, int, int]] = set()
 EDIT_SELECTION_OPTIONS: dict[tuple[int, int, int], dict[str, str]] = {}
 EDIT_TARGET_TASK: dict[tuple[int, int, int], str] = {}
-PENDING_EDIT_TASK: dict[tuple[int, int, int], tuple[str, str]] = {}
+EDIT_TARGET_SCOPES: dict[tuple[int, int, int], tuple[int, str]] = {}
+PENDING_EDIT_TASK: dict[tuple[int, int, int], tuple[str, str, int]] = {}
 
 # key: (chat_id, thread_id)
 SUMMARY_MESSAGE_IDS: dict[tuple[int, int], list[int]] = {}
@@ -339,6 +340,45 @@ def build_router(
         for item in messages:
             await message.answer(item.text, parse_mode=item.parse_mode)
 
+    async def _resolve_edit_task_from_token(
+        *,
+        chat_id: int,
+        thread_id: int,
+        user_id: int,
+        token: str,
+    ) -> str | None:
+        key = (chat_id, thread_id, user_id)
+        options = EDIT_SELECTION_OPTIONS.get(key) or {}
+        external_id = options.get(token)
+        if external_id:
+            return external_id
+
+        try:
+            task_index = int(token)
+        except ValueError:
+            return None
+        if task_index < 1:
+            return None
+
+        try:
+            tasks = await asyncio.to_thread(
+                db.get_tasks_for_scope,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to reload edit task list for chat_id=%s thread_id=%s",
+                chat_id,
+                thread_id,
+            )
+            return None
+
+        ordered = sorted(tasks, key=_task_sort_key)
+        if task_index > len(ordered):
+            return None
+        return ordered[task_index - 1].external_id
+
     async def _show_help(message: Message) -> None:
         chat_id, thread_id = _scope_from_message(message)
         user_id = _user_id_from_message(message)
@@ -443,7 +483,7 @@ def build_router(
                 [
                     InlineKeyboardButton(
                         text=f"{idx}. {title}",
-                        callback_data=f"{EDIT_TASK_PICK_PREFIX}{token}",
+                        callback_data=f"{EDIT_TASK_PICK_PREFIX}{token}|{thread_id}",
                     )
                 ]
             )
@@ -453,6 +493,7 @@ def build_router(
 
         EDIT_SELECTION_OPTIONS[key] = selection
         EDIT_TARGET_TASK.pop(key, None)
+        EDIT_TARGET_SCOPES.pop(key, None)
         PENDING_EDIT_TASK.pop(key, None)
 
         note = ""
@@ -680,6 +721,7 @@ def build_router(
         DEV_MODE_SCOPES.discard(key)
         EDIT_SELECTION_OPTIONS.pop(key, None)
         EDIT_TARGET_TASK.pop(key, None)
+        EDIT_TARGET_SCOPES.pop(key, None)
         PENDING_EDIT_TASK.pop(key, None)
         await message.answer(
             "Режим программиста выключен.",
@@ -749,23 +791,35 @@ def build_router(
             return
 
         chat_id = message.chat.id
-        thread_id = message.message_thread_id or 0
+        callback_thread_id = message.message_thread_id or 0
         user_id = callback.from_user.id
-        key = (chat_id, thread_id, user_id)
-        token = (callback.data or "")[len(EDIT_TASK_PICK_PREFIX) :]
+        payload = (callback.data or "")[len(EDIT_TASK_PICK_PREFIX) :]
+        token, scope_thread_id = _parse_edit_payload_thread(
+            payload=payload,
+            fallback_thread_id=callback_thread_id,
+        )
+        key = (chat_id, scope_thread_id, user_id)
 
-        options = EDIT_SELECTION_OPTIONS.get(key) or {}
-        external_id = options.get(token)
+        external_id = await _resolve_edit_task_from_token(
+            chat_id=chat_id,
+            thread_id=scope_thread_id,
+            user_id=user_id,
+            token=token,
+        )
         if not external_id:
             await message.answer("Список задач устарел. Нажмите «Редактировать задачи» еще раз.")
             return
 
         EDIT_TARGET_TASK[key] = external_id
+        EDIT_TARGET_SCOPES[key] = (scope_thread_id, external_id)
+        callback_key = (chat_id, callback_thread_id, user_id)
+        EDIT_TARGET_TASK[callback_key] = external_id
+        EDIT_TARGET_SCOPES[callback_key] = (scope_thread_id, external_id)
         PENDING_EDIT_TASK.pop(key, None)
 
         await message.answer(
             "Выберите поле для редактирования:",
-            reply_markup=_edit_fields_keyboard(),
+            reply_markup=_edit_fields_keyboard(scope_thread_id=scope_thread_id),
         )
 
     @router.callback_query(lambda c: (c.data or "").startswith(EDIT_FIELD_PREFIX))
@@ -776,20 +830,27 @@ def build_router(
             return
 
         chat_id = message.chat.id
-        thread_id = message.message_thread_id or 0
+        callback_thread_id = message.message_thread_id or 0
         user_id = callback.from_user.id
-        key = (chat_id, thread_id, user_id)
+        payload = (callback.data or "")[len(EDIT_FIELD_PREFIX) :]
+        field, scope_thread_id = _parse_edit_payload_thread(
+            payload=payload,
+            fallback_thread_id=callback_thread_id,
+        )
+        key = (chat_id, scope_thread_id, user_id)
 
-        external_id = EDIT_TARGET_TASK.get(key)
+        target = EDIT_TARGET_SCOPES.get(key) or EDIT_TARGET_SCOPES.get(
+            (chat_id, callback_thread_id, user_id)
+        )
+        external_id = target[1] if target else EDIT_TARGET_TASK.get(key)
         if not external_id:
             await message.answer("Сначала выберите задачу через «Редактировать задачи».")
             return
 
-        field = (callback.data or "")[len(EDIT_FIELD_PREFIX) :]
         if field == FIELD_STATUS:
             await message.answer(
                 "Выберите новый статус:",
-                reply_markup=_edit_status_keyboard(),
+                reply_markup=_edit_status_keyboard(scope_thread_id=scope_thread_id),
             )
             return
 
@@ -797,7 +858,12 @@ def build_router(
             await message.answer("Неизвестное поле редактирования.")
             return
 
-        PENDING_EDIT_TASK[key] = (external_id, field)
+        PENDING_EDIT_TASK[key] = (external_id, field, scope_thread_id)
+        PENDING_EDIT_TASK[(chat_id, callback_thread_id, user_id)] = (
+            external_id,
+            field,
+            scope_thread_id,
+        )
         prompt = {
             FIELD_TITLE: "Введите новое название задачи:",
             FIELD_DESCRIPTION: "Введите новое описание задачи:",
@@ -815,16 +881,23 @@ def build_router(
             return
 
         chat_id = message.chat.id
-        thread_id = message.message_thread_id or 0
+        callback_thread_id = message.message_thread_id or 0
         user_id = callback.from_user.id
-        key = (chat_id, thread_id, user_id)
+        payload = (callback.data or "")[len(EDIT_STATUS_PREFIX) :]
+        code, scope_thread_id = _parse_edit_payload_thread(
+            payload=payload,
+            fallback_thread_id=callback_thread_id,
+        )
+        key = (chat_id, scope_thread_id, user_id)
 
-        external_id = EDIT_TARGET_TASK.get(key)
+        target = EDIT_TARGET_SCOPES.get(key) or EDIT_TARGET_SCOPES.get(
+            (chat_id, callback_thread_id, user_id)
+        )
+        external_id = target[1] if target else EDIT_TARGET_TASK.get(key)
         if not external_id:
             await message.answer("Сначала выберите задачу через «Редактировать задачи».")
             return
 
-        code = (callback.data or "")[len(EDIT_STATUS_PREFIX) :]
         status = CODE_TO_STATUS.get(code)
         if status is None:
             await message.answer("Неизвестный статус.")
@@ -834,7 +907,7 @@ def build_router(
             updated = await asyncio.to_thread(
                 db.update_task_for_scope,
                 chat_id=chat_id,
-                thread_id=thread_id,
+                thread_id=scope_thread_id,
                 external_id=external_id,
                 status=status,
             )
@@ -842,7 +915,7 @@ def build_router(
             logger.exception(
                 "Failed to update status for chat_id=%s thread_id=%s external_id=%s",
                 chat_id,
-                thread_id,
+                scope_thread_id,
                 external_id,
             )
             await message.answer("Не удалось обновить задачу в БД.")
@@ -863,6 +936,7 @@ def build_router(
         key = (message.chat.id, message.message_thread_id or 0, callback.from_user.id)
         EDIT_SELECTION_OPTIONS.pop(key, None)
         EDIT_TARGET_TASK.pop(key, None)
+        EDIT_TARGET_SCOPES.pop(key, None)
         PENDING_EDIT_TASK.pop(key, None)
         await message.answer("Редактирование отменено.")
 
@@ -872,6 +946,8 @@ def build_router(
         user_id = _user_id_from_message(message)
         key = (chat_id, thread_id, user_id)
         pending = PENDING_EDIT_TASK.get(key)
+        if pending is None:
+            pending = _find_pending_edit_for_user(chat_id=chat_id, user_id=user_id)
         if pending is None:
             return
 
@@ -884,7 +960,7 @@ def build_router(
             await message.answer("Редактирование отменено.")
             return
 
-        external_id, field = pending
+        external_id, field, scope_thread_id = pending
         update_kwargs: dict[str, str] = {}
         if field == FIELD_DEADLINE:
             normalized = _normalize_deadline_input(text)
@@ -899,7 +975,7 @@ def build_router(
             updated = await asyncio.to_thread(
                 db.update_task_for_scope,
                 chat_id=chat_id,
-                thread_id=thread_id,
+                thread_id=scope_thread_id,
                 external_id=external_id,
                 **update_kwargs,
             )
@@ -908,7 +984,7 @@ def build_router(
                 "Failed to update task field %s for chat_id=%s thread_id=%s external_id=%s",
                 field,
                 chat_id,
-                thread_id,
+                scope_thread_id,
                 external_id,
             )
             await message.answer("Не удалось обновить задачу в БД.")
@@ -919,6 +995,8 @@ def build_router(
             return
 
         PENDING_EDIT_TASK.pop(key, None)
+        if scope_thread_id != thread_id:
+            PENDING_EDIT_TASK.pop((chat_id, scope_thread_id, user_id), None)
         field_label = {
             FIELD_TITLE: "Название",
             FIELD_DESCRIPTION: "Описание",
@@ -1073,27 +1151,27 @@ def _keyboard_for_user_scope(*, chat_id: int, thread_id: int, user_id: int) -> R
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
-def _edit_fields_keyboard() -> InlineKeyboardMarkup:
+def _edit_fields_keyboard(*, scope_thread_id: int = 0) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Название", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_TITLE}"),
-                InlineKeyboardButton(text="Описание", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_DESCRIPTION}"),
+                InlineKeyboardButton(text="Название", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_TITLE}|{scope_thread_id}"),
+                InlineKeyboardButton(text="Описание", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_DESCRIPTION}|{scope_thread_id}"),
             ],
             [
-                InlineKeyboardButton(text="Дедлайн", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_DEADLINE}"),
-                InlineKeyboardButton(text="Автор", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_AUTHOR}"),
+                InlineKeyboardButton(text="Дедлайн", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_DEADLINE}|{scope_thread_id}"),
+                InlineKeyboardButton(text="Автор", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_AUTHOR}|{scope_thread_id}"),
             ],
             [
-                InlineKeyboardButton(text="Исполнитель", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_ASSIGNEE}"),
-                InlineKeyboardButton(text="Статус", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_STATUS}"),
+                InlineKeyboardButton(text="Исполнитель", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_ASSIGNEE}|{scope_thread_id}"),
+                InlineKeyboardButton(text="Статус", callback_data=f"{EDIT_FIELD_PREFIX}{FIELD_STATUS}|{scope_thread_id}"),
             ],
             [InlineKeyboardButton(text="Отмена", callback_data=EDIT_CANCEL_CALLBACK)],
         ]
     )
 
 
-def _edit_status_keyboard() -> InlineKeyboardMarkup:
+def _edit_status_keyboard(*, scope_thread_id: int = 0) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for status in STATUS_ORDER:
         code = STATUS_TO_CODE[status]
@@ -1101,7 +1179,7 @@ def _edit_status_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text=f"{_status_icon(status)} {status}",
-                    callback_data=f"{EDIT_STATUS_PREFIX}{code}",
+                    callback_data=f"{EDIT_STATUS_PREFIX}{code}|{scope_thread_id}",
                 )
             ]
         )
@@ -1162,6 +1240,27 @@ def _task_sort_key(task: TaskRecord) -> tuple[int, str]:
     except ValueError:
         order = len(STATUS_ORDER)
     return order, task.title.lower()
+
+
+def _parse_edit_payload_thread(*, payload: str, fallback_thread_id: int) -> tuple[str, int]:
+    token, separator, raw_thread_id = payload.partition("|")
+    if not separator:
+        return token, fallback_thread_id
+    try:
+        return token, int(raw_thread_id)
+    except ValueError:
+        return token, fallback_thread_id
+
+
+def _find_pending_edit_for_user(*, chat_id: int, user_id: int) -> tuple[str, str, int] | None:
+    matches = [
+        pending
+        for key, pending in PENDING_EDIT_TASK.items()
+        if key[0] == chat_id and key[2] == user_id
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
 
 
 def _trim_text(text: str, *, limit: int) -> str:
@@ -1389,7 +1488,9 @@ def _has_pending_edit(message: Message) -> bool:
     if text.startswith("/") and text.lower() not in {"/cancel"}:
         return False
     key = (message.chat.id, message.message_thread_id or 0, message.from_user.id)
-    return key in PENDING_EDIT_TASK
+    if key in PENDING_EDIT_TASK:
+        return True
+    return _find_pending_edit_for_user(chat_id=message.chat.id, user_id=message.from_user.id) is not None
 
 
 def _is_bot_connected_to_chat(event: ChatMemberUpdated) -> bool:
