@@ -333,22 +333,38 @@ async def _run_scheduled_summaries(
     db: Database,
     extractor: AIExtractor,
     settings: Settings,
+    scheduled_for: datetime,
 ) -> None:
     logger = logging.getLogger(__name__)
+    slot_key = _schedule_slot_key(scheduled_for)
+    try:
+        claimed = await asyncio.to_thread(db.claim_schedule_slot, slot_key=slot_key)
+    except Exception:
+        logger.exception("Failed to claim scheduled summary slot %s", slot_key)
+        return
+
+    if not claimed:
+        logger.info("Scheduled summary slot %s is already processed; skipping", slot_key)
+        return
+
     if settings.strict_target_scope and settings.target_chat_id is not None:
         scopes = [(settings.target_chat_id, settings.target_topic_id or 0)]
     else:
         try:
-            scopes = await asyncio.to_thread(db.list_message_scopes)
+            scopes = await asyncio.to_thread(db.list_task_scopes)
         except Exception:
-            logger.exception("Failed to list DB scopes for scheduled summary")
+            logger.exception("Failed to list task scopes for scheduled summary")
             return
 
     if not scopes:
-        logger.info("No known scopes for scheduled summary run")
+        logger.info("No task scopes available for scheduled summary slot %s", slot_key)
         return
 
-    logger.info("Scheduled summary run started for %s scope(s)", len(scopes))
+    logger.info(
+        "Scheduled summary run started for slot %s in %s scope(s)",
+        slot_key,
+        len(scopes),
+    )
     sent_count = 0
     for chat_id, thread_id in scopes:
         try:
@@ -369,7 +385,12 @@ async def _run_scheduled_summaries(
                 chat_id,
                 thread_id,
             )
-    logger.info("Scheduled summary run finished: %s/%s scope(s) sent", sent_count, len(scopes))
+    logger.info(
+        "Scheduled summary run finished for slot %s: %s/%s scope(s) sent",
+        slot_key,
+        sent_count,
+        len(scopes),
+    )
 
 
 async def _scheduled_summary_loop(
@@ -402,7 +423,13 @@ async def _scheduled_summary_loop(
             db=db,
             extractor=extractor,
             settings=settings,
+            scheduled_for=next_run,
         )
+
+
+def _schedule_slot_key(scheduled_for: datetime) -> str:
+    local_slot = scheduled_for.replace(second=0, microsecond=0)
+    return local_slot.isoformat()
 
 
 def _load_bot_command_types():

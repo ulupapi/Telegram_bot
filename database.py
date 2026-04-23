@@ -95,6 +95,8 @@ class _DatabaseBackend(Protocol):
         status: str | None = None,
     ) -> bool: ...
     def list_message_scopes(self) -> list[tuple[int, int]]: ...
+    def list_task_scopes(self) -> list[tuple[int, int]]: ...
+    def claim_schedule_slot(self, *, slot_key: str) -> bool: ...
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]: ...
     def clear_all(self) -> tuple[int, int, int]: ...
     def learn_scope_alias(self, *, alias: str, chat_id: int, thread_id: int) -> None: ...
@@ -171,6 +173,14 @@ class _SQLiteBackend:
                         thread_id INTEGER NOT NULL,
                         is_manual INTEGER NOT NULL DEFAULT 0,
                         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                self.conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS schedule_runs (
+                        slot_key TEXT PRIMARY KEY,
+                        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                     """
                 )
@@ -472,6 +482,30 @@ class _SQLiteBackend:
             ).fetchall()
         return [(int(row["chat_id"]), int(row["thread_id"])) for row in rows]
 
+    def list_task_scopes(self) -> list[tuple[int, int]]:
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT DISTINCT scope_chat_id AS chat_id, scope_thread_id AS thread_id
+                FROM tasks
+                WHERE scope_chat_id != 0
+                ORDER BY scope_chat_id, scope_thread_id
+                """
+            ).fetchall()
+        return [(int(row["chat_id"]), int(row["thread_id"])) for row in rows]
+
+    def claim_schedule_slot(self, *, slot_key: str) -> bool:
+        with self._lock:
+            with self.conn:
+                cur = self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO schedule_runs (slot_key)
+                    VALUES (?)
+                    """,
+                    (slot_key,),
+                )
+        return cur.rowcount > 0
+
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
         with self._lock:
             with self.conn:
@@ -706,6 +740,14 @@ class _PostgresBackend:
                         thread_id BIGINT NOT NULL,
                         is_manual BOOLEAN NOT NULL DEFAULT FALSE,
                         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS schedule_runs (
+                        slot_key TEXT PRIMARY KEY,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
                     )
                     """
                 )
@@ -1033,6 +1075,37 @@ class _PostgresBackend:
         rows = self._run_with_reconnect("list_message_scopes", _op)
         return [(int(row["chat_id"]), int(row["thread_id"])) for row in rows]
 
+    def list_task_scopes(self) -> list[tuple[int, int]]:
+        def _op():
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT scope_chat_id AS chat_id, scope_thread_id AS thread_id
+                    FROM tasks
+                    WHERE scope_chat_id != 0
+                    ORDER BY scope_chat_id, scope_thread_id
+                    """
+                )
+                return cur.fetchall()
+
+        rows = self._run_with_reconnect("list_task_scopes", _op)
+        return [(int(row["chat_id"]), int(row["thread_id"])) for row in rows]
+
+    def claim_schedule_slot(self, *, slot_key: str) -> bool:
+        def _op() -> bool:
+            with self.conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO schedule_runs (slot_key)
+                    VALUES (%s)
+                    ON CONFLICT (slot_key) DO NOTHING
+                    """,
+                    (slot_key,),
+                )
+                return cur.rowcount > 0
+
+        return self._run_with_reconnect("claim_schedule_slot", _op)
+
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
         def _op() -> tuple[int, int]:
             with self.conn.transaction():
@@ -1268,6 +1341,12 @@ class Database:
 
     def list_message_scopes(self) -> list[tuple[int, int]]:
         return self._backend.list_message_scopes()
+
+    def list_task_scopes(self) -> list[tuple[int, int]]:
+        return self._backend.list_task_scopes()
+
+    def claim_schedule_slot(self, *, slot_key: str) -> bool:
+        return self._backend.claim_schedule_slot(slot_key=slot_key)
 
     def clear_scope(self, *, chat_id: int, thread_id: int) -> tuple[int, int]:
         return self._backend.clear_scope(chat_id=chat_id, thread_id=thread_id)
