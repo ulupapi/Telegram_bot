@@ -54,6 +54,24 @@ def _install_runtime_compat_shims() -> None:
         setattr(builtins, "_scope_key", _scope_key)
         installed.append("_scope_key")
 
+    if not hasattr(builtins, "_all_control_button_texts"):
+        def _all_control_button_texts() -> set[str]:
+            return {
+                "📊 Получить сводку",
+                "✏️ Редактировать задачи",
+                "❓ Помощь",
+                "🛠 Режим программиста",
+                "👤 Обычный режим",
+                "🧹 Очистить текущий контекст",
+                "🧨 Очистить всю БД",
+                "🕒 Параметры расписания",
+                "📍 Текущий контекст",
+                "Отмена",
+            }
+
+        setattr(builtins, "_all_control_button_texts", _all_control_button_texts)
+        installed.append("_all_control_button_texts")
+
     if not hasattr(builtins, "BotCommand"):
         try:
             from aiogram.types import (
@@ -270,8 +288,10 @@ async def main() -> None:
             settings.schedule_timezone,
         )
 
+    allowed_updates = dp.resolve_used_update_types()
+    logging.getLogger(__name__).info("Starting polling with allowed_updates=%s", allowed_updates)
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await dp.start_polling(bot, allowed_updates=allowed_updates)
     finally:
         if scheduler_task is not None:
             scheduler_task.cancel()

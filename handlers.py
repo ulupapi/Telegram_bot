@@ -72,6 +72,11 @@ CONTROL_BUTTON_TEXTS = {
     BTN_EDIT_CANCEL,
 }
 
+
+def _all_control_button_texts() -> set[str]:
+    return set(CONTROL_BUTTON_TEXTS)
+
+
 # key: (chat_id, thread_id, user_id)
 DEV_MODE_SCOPES: set[tuple[int, int, int]] = set()
 EDIT_SELECTION_OPTIONS: dict[tuple[int, int, int], dict[str, str]] = {}
@@ -484,11 +489,22 @@ def build_router(
                 member = await message.bot.get_chat_member(message.chat.id, me.id)
                 status = getattr(member, "status", "unknown")
                 lines.append(f"• Статус в группе: {status}")
+                lines.append(f"• Может отправлять сообщения: {_can_send_messages_label(member)}")
+                lines.append(
+                    "• Может удалять старые сообщения сводки: "
+                    f"{_permission_label(getattr(member, 'can_delete_messages', None))}"
+                )
+                lines.append(
+                    "• Может работать с топиками: "
+                    f"{_permission_label(getattr(member, 'can_manage_topics', None))}"
+                )
             except Exception:
                 lines.append("• Статус в группе: не удалось получить.")
             lines.extend(
                 [
                     "",
+                    "Если эта команда отвечает в группе, значит бот получает message updates.",
+                    "Если обычные сообщения не попадают в контекст, почти всегда включен Privacy Mode или бот не администратор.",
                     "Чтобы бот стабильно собирал контекст в группе:",
                     "1. В BotFather отключите Privacy Mode: /setprivacy -> Disable.",
                     "2. Выдайте боту права администратора в группе (рекомендуется).",
@@ -812,7 +828,7 @@ def build_router(
             return
         if text.startswith("/"):
             return
-        if text in CONTROL_BUTTON_TEXTS:
+        if text in _all_control_button_texts():
             return
 
         if message.from_user and message.from_user.is_bot:
@@ -1067,6 +1083,24 @@ def _status_icon(status: str) -> str:
     if status == "Отозвана":
         return "⚪"
     return "▫️"
+
+
+def _permission_label(value: object) -> str:
+    if value is True:
+        return "да"
+    if value is False:
+        return "нет"
+    return "не указано Telegram API"
+
+
+def _can_send_messages_label(member: object) -> str:
+    status = getattr(member, "status", "")
+    if status in {"creator", "administrator"}:
+        return "да"
+    can_send = getattr(member, "can_send_messages", None)
+    if can_send is False:
+        return "нет"
+    return "да"
 
 
 def _telegram_author(message: Message) -> str:
