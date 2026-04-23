@@ -1020,10 +1020,13 @@ def _render_task_message_html(*, task_index: int, total: int, task: TaskRecord) 
 
 
 def _ordered_tasks(report: StatusReport) -> list[TaskRecord]:
+    tasks = list(getattr(report, "tasks", []) or [])
     ordered: list[TaskRecord] = []
     for status in STATUS_ORDER:
-        status_tasks = [task for task in report.tasks if task.status == status]
+        status_tasks = [task for task in tasks if task.status == status]
         ordered.extend(status_tasks)
+    ordered_ids = {id(task) for task in ordered}
+    ordered.extend(task for task in tasks if id(task) not in ordered_ids)
     return ordered
 
 
@@ -1079,6 +1082,10 @@ def _telegram_author(message: Message) -> str:
 
 def _scope_from_message(message: Message) -> tuple[int, int]:
     return message.chat.id, message.message_thread_id or 0
+
+
+def _scope_key(*, chat_id: int, thread_id: int) -> tuple[int, int]:
+    return chat_id, thread_id
 
 
 def _user_id_from_message(message: Message) -> int:

@@ -47,6 +47,13 @@ def _install_runtime_compat_shims() -> None:
             setattr(builtins, "Command", CommandFilter)
             installed.append("Command")
 
+    if not hasattr(builtins, "_scope_key"):
+        def _scope_key(*, chat_id: int, thread_id: int) -> tuple[int, int]:
+            return chat_id, thread_id
+
+        setattr(builtins, "_scope_key", _scope_key)
+        installed.append("_scope_key")
+
     if not hasattr(builtins, "BotCommand"):
         try:
             from aiogram.types import (
