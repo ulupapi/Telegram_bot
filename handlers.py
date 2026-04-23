@@ -109,6 +109,17 @@ async def build_and_publish_scope_summary(
         thread_id=thread_id,
         limit=context_messages_limit,
     )
+    if not rows and thread_id:
+        logger.info(
+            "No messages in chat_id=%s thread_id=%s; trying whole chat fallback",
+            chat_id,
+            thread_id,
+        )
+        rows = await asyncio.to_thread(
+            db.get_recent_chat_messages,
+            chat_id=chat_id,
+            limit=context_messages_limit,
+        )
     if not rows:
         return False
 
@@ -472,8 +483,32 @@ def build_router(
             lines.append(
                 f"• Scope режим: strict (фиксированная цель chat_id={target_chat_id}{suffix})"
             )
+            if chat_id != target_chat_id:
+                lines.append("• Внимание: этот чат не совпадает с TARGET_CHAT_ID, обычные сообщения будут игнорироваться.")
+            elif target_topic_id is not None and thread_id != target_topic_id:
+                lines.append("• Внимание: эта ветка не совпадает с TARGET_TOPIC_ID, обычные сообщения будут игнорироваться.")
         else:
             lines.append("• Scope режим: multi-chat (текущий чат/ветка)")
+
+        try:
+            thread_message_count = await asyncio.to_thread(
+                db.count_thread_messages,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+            chat_message_count = await asyncio.to_thread(
+                db.count_chat_messages,
+                chat_id=chat_id,
+            )
+            lines.append(f"• Сообщений в текущей ветке в БД: {thread_message_count}")
+            lines.append(f"• Сообщений во всем чате в БД: {chat_message_count}")
+        except Exception:
+            logger.exception(
+                "Failed to count stored messages for chat_id=%s thread_id=%s",
+                chat_id,
+                thread_id,
+            )
+            lines.append("• Сообщения в БД: не удалось проверить.")
 
         if can_read_all is True:
             lines.append("• Privacy Mode: выключен (бот видит обычные сообщения групп).")

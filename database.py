@@ -64,6 +64,14 @@ class _DatabaseBackend(Protocol):
         thread_id: int,
         limit: int,
     ) -> list[StoredMessage]: ...
+    def get_recent_chat_messages(
+        self,
+        *,
+        chat_id: int,
+        limit: int,
+    ) -> list[StoredMessage]: ...
+    def count_thread_messages(self, *, chat_id: int, thread_id: int) -> int: ...
+    def count_chat_messages(self, *, chat_id: int) -> int: ...
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None: ...
     def replace_tasks_for_scope(
         self,
@@ -227,6 +235,57 @@ class _SQLiteBackend:
             )
             for row in reversed(rows)
         ]
+
+    def get_recent_chat_messages(
+        self,
+        *,
+        chat_id: int,
+        limit: int,
+    ) -> list[StoredMessage]:
+        with self._lock:
+            rows = self.conn.execute(
+                """
+                SELECT created_at, user_name, text
+                FROM messages
+                WHERE chat_id = ?
+                ORDER BY message_id DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            ).fetchall()
+
+        return [
+            StoredMessage(
+                created_at=row["created_at"],
+                user_name=row["user_name"],
+                text=row["text"],
+            )
+            for row in reversed(rows)
+        ]
+
+    def count_thread_messages(self, *, chat_id: int, thread_id: int) -> int:
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT COUNT(*) AS message_count
+                FROM messages
+                WHERE chat_id = ? AND thread_id = ?
+                """,
+                (chat_id, thread_id),
+            ).fetchone()
+        return int(row["message_count"]) if row is not None else 0
+
+    def count_chat_messages(self, *, chat_id: int) -> int:
+        with self._lock:
+            row = self.conn.execute(
+                """
+                SELECT COUNT(*) AS message_count
+                FROM messages
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+        return int(row["message_count"]) if row is not None else 0
 
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None:
         with self._lock:
@@ -711,6 +770,69 @@ class _PostgresBackend:
             for row in reversed(rows)
         ]
 
+    def get_recent_chat_messages(
+        self,
+        *,
+        chat_id: int,
+        limit: int,
+    ) -> list[StoredMessage]:
+        def _op():
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT created_at, user_name, text
+                    FROM messages
+                    WHERE chat_id = %s
+                    ORDER BY message_id DESC
+                    LIMIT %s
+                    """,
+                    (chat_id, limit),
+                )
+                return cur.fetchall()
+
+        rows = self._run_with_reconnect("get_recent_chat_messages", _op)
+
+        return [
+            StoredMessage(
+                created_at=row["created_at"],
+                user_name=row["user_name"],
+                text=row["text"],
+            )
+            for row in reversed(rows)
+        ]
+
+    def count_thread_messages(self, *, chat_id: int, thread_id: int) -> int:
+        def _op() -> int:
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS message_count
+                    FROM messages
+                    WHERE chat_id = %s AND thread_id = %s
+                    """,
+                    (chat_id, thread_id),
+                )
+                row = cur.fetchone()
+                return int(row["message_count"]) if row is not None else 0
+
+        return self._run_with_reconnect("count_thread_messages", _op)
+
+    def count_chat_messages(self, *, chat_id: int) -> int:
+        def _op() -> int:
+            with self.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS message_count
+                    FROM messages
+                    WHERE chat_id = %s
+                    """,
+                    (chat_id,),
+                )
+                row = cur.fetchone()
+                return int(row["message_count"]) if row is not None else 0
+
+        return self._run_with_reconnect("count_chat_messages", _op)
+
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None:
         def _op() -> None:
             with self.conn.transaction():
@@ -1079,6 +1201,26 @@ class Database:
             thread_id=thread_id,
             limit=limit,
         )
+
+    def get_recent_chat_messages(
+        self,
+        *,
+        chat_id: int,
+        limit: int,
+    ) -> list[StoredMessage]:
+        return self._backend.get_recent_chat_messages(
+            chat_id=chat_id,
+            limit=limit,
+        )
+
+    def count_thread_messages(self, *, chat_id: int, thread_id: int) -> int:
+        return self._backend.count_thread_messages(
+            chat_id=chat_id,
+            thread_id=thread_id,
+        )
+
+    def count_chat_messages(self, *, chat_id: int) -> int:
+        return self._backend.count_chat_messages(chat_id=chat_id)
 
     def replace_tasks(self, tasks: Sequence[TaskRecord]) -> None:
         self._backend.replace_tasks(tasks)
