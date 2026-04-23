@@ -58,6 +58,7 @@ def _install_runtime_compat_shims() -> None:
         def _all_control_button_texts() -> set[str]:
             return {
                 "📊 Получить сводку",
+                "📋 Показать сохраненные задачи",
                 "✏️ Редактировать задачи",
                 "❓ Помощь",
                 "🛠 Режим программиста",
@@ -441,6 +442,7 @@ async def _configure_bot_commands(bot: Bot) -> None:
     commands = [
         BotCommandType(command="start", description="Показать главное меню с кнопками"),
         BotCommandType(command="status", description="Сводка: сделано / в работе / зависло"),
+        BotCommandType(command="tasks", description="Показать сохраненные задачи без LLM"),
         BotCommandType(command="edit", description="Ручное редактирование задач"),
         BotCommandType(command="bind", description="Привязать имя к текущему чату/ветке"),
         BotCommandType(command="where", description="Показать текущий chat_id/topic_id"),

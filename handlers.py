@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 STATUS_ORDER = ["В ожидании", "В работе", "Завершена", "Отклонена", "Отозвана"]
 
 BTN_SUMMARY = "📊 Получить сводку"
+BTN_SAVED_TASKS = "📋 Показать сохраненные задачи"
 BTN_EDIT_TASK = "✏️ Редактировать задачи"
 BTN_HELP = "❓ Помощь"
 BTN_DEV_ENTER = "🛠 Режим программиста"
@@ -61,6 +62,7 @@ CODE_TO_STATUS = {value: key for key, value in STATUS_TO_CODE.items()}
 
 CONTROL_BUTTON_TEXTS = {
     BTN_SUMMARY,
+    BTN_SAVED_TASKS,
     BTN_EDIT_TASK,
     BTN_HELP,
     BTN_DEV_ENTER,
@@ -149,6 +151,27 @@ def render_status_messages_safe(report: StatusReport) -> list[RenderedMessage]:
     messages = [RenderedMessage(text=summary)]
     total = len(tasks)
     for idx, task in enumerate(tasks, start=1):
+        messages.append(_render_task_message_html(task_index=idx, total=total, task=task))
+    return messages
+
+
+def render_saved_task_messages(tasks: list[TaskRecord]) -> list[RenderedMessage]:
+    if not tasks:
+        return [RenderedMessage(text="📋 Сохраненные задачи\n• Задачи не найдены.")]
+
+    report = StatusReport(done=[], in_progress=[], blocked=[], tasks=tasks)
+    ordered_tasks = _ordered_tasks(report)
+    messages = [
+        RenderedMessage(
+            text=(
+                "📋 Сохраненные задачи из БД\n"
+                "LLM не вызывался, токены не тратились.\n"
+                f"Всего задач: {len(ordered_tasks)}"
+            )
+        )
+    ]
+    total = len(ordered_tasks)
+    for idx, task in enumerate(ordered_tasks, start=1):
         messages.append(_render_task_message_html(task_index=idx, total=total, task=task))
     return messages
 
@@ -277,12 +300,52 @@ def build_router(
             f"• Контекст: chat_id={scope_chat_id}{scope_suffix}"
         )
 
+    async def _show_saved_tasks(message: Message) -> None:
+        scope = await _resolve_scope_from_message_or_alias(
+            message=message,
+            db=db,
+            target_chat_id=target_chat_id,
+            target_topic_id=target_topic_id,
+            strict_target_scope=strict_target_scope,
+            alias_raw=_command_argument(message),
+        )
+        if scope is None:
+            return
+        scope_chat_id, scope_thread_id = scope
+
+        try:
+            tasks = await asyncio.to_thread(
+                db.get_tasks_for_scope,
+                chat_id=scope_chat_id,
+                thread_id=scope_thread_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to load saved tasks for chat_id=%s thread_id=%s",
+                scope_chat_id,
+                scope_thread_id,
+            )
+            await message.answer("Не удалось прочитать сохраненные задачи из БД.")
+            return
+
+        if not tasks:
+            await message.answer(
+                "В БД пока нет сохраненных задач для этого контекста.\n"
+                "Сначала нажмите «📊 Получить сводку», чтобы LLM один раз выделил задачи."
+            )
+            return
+
+        messages = render_saved_task_messages(tasks)
+        for item in messages:
+            await message.answer(item.text, parse_mode=item.parse_mode)
+
     async def _show_help(message: Message) -> None:
         chat_id, thread_id = _scope_from_message(message)
         user_id = _user_id_from_message(message)
         await message.answer(
             "Команды:\n"
             "• /status [алиас] — получить сводку через LLM\n"
+            "• /tasks [алиас] — показать сохраненные задачи без LLM\n"
             "• /bind <алиас> — привязать имя к текущему чату/ветке\n"
             "• /edit — открыть режим редактирования задач\n"
             "• /where — показать текущий chat_id/topic_id\n"
@@ -291,6 +354,7 @@ def build_router(
             "• /clear_db all — очистка всей базы\n\n"
             "Кнопки главного меню:\n"
             f"• {BTN_SUMMARY} — запрос сводки у LLM и вывод задач\n"
+            f"• {BTN_SAVED_TASKS} — показать уже сохраненные задачи без LLM и без токенов\n"
             f"• {BTN_EDIT_TASK} — выбор задачи и ручное редактирование\n"
             f"• {BTN_HELP} — эта справка\n"
             f"• {BTN_DEV_ENTER} — расширенные операции (очистка/диагностика/расписание)",
@@ -557,6 +621,10 @@ def build_router(
     async def cmd_edit(message: Message) -> None:
         await _start_edit_mode(message)
 
+    @router.message(CommandFilter("tasks"))
+    async def cmd_tasks(message: Message) -> None:
+        await _show_saved_tasks(message)
+
     @router.message(CommandFilter("status"))
     async def cmd_status(message: Message) -> None:
         await _handle_status_request(message, _command_argument(message))
@@ -580,6 +648,10 @@ def build_router(
     @router.message(lambda m: ((m.text or "").strip() == BTN_SUMMARY))
     async def btn_summary(message: Message) -> None:
         await _handle_status_request(message)
+
+    @router.message(lambda m: ((m.text or "").strip() == BTN_SAVED_TASKS))
+    async def btn_saved_tasks(message: Message) -> None:
+        await _show_saved_tasks(message)
 
     @router.message(lambda m: ((m.text or "").strip() == BTN_HELP))
     async def btn_help(message: Message) -> None:
@@ -964,6 +1036,7 @@ def _startup_text(
             "",
             "Основные действия:",
             f"• {BTN_SUMMARY}",
+            f"• {BTN_SAVED_TASKS}",
             f"• {BTN_EDIT_TASK}",
             f"• {BTN_HELP}",
             f"• {BTN_DEV_ENTER}",
@@ -985,14 +1058,16 @@ def _keyboard_for_user_scope(*, chat_id: int, thread_id: int, user_id: int) -> R
     key = (chat_id, thread_id, user_id)
     if key in DEV_MODE_SCOPES:
         rows = [
-            [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_EDIT_TASK)],
+            [KeyboardButton(text=BTN_SUMMARY)],
+            [KeyboardButton(text=BTN_SAVED_TASKS), KeyboardButton(text=BTN_EDIT_TASK)],
             [KeyboardButton(text=BTN_DEV_CLEAR_SCOPE), KeyboardButton(text=BTN_DEV_CLEAR_ALL)],
             [KeyboardButton(text=BTN_DEV_WHERE), KeyboardButton(text=BTN_DEV_SCHEDULE)],
             [KeyboardButton(text=BTN_HELP), KeyboardButton(text=BTN_DEV_BACK)],
         ]
     else:
         rows = [
-            [KeyboardButton(text=BTN_SUMMARY), KeyboardButton(text=BTN_EDIT_TASK)],
+            [KeyboardButton(text=BTN_SUMMARY)],
+            [KeyboardButton(text=BTN_SAVED_TASKS), KeyboardButton(text=BTN_EDIT_TASK)],
             [KeyboardButton(text=BTN_HELP), KeyboardButton(text=BTN_DEV_ENTER)],
         ]
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
