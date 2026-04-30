@@ -157,11 +157,21 @@ def load_settings() -> Settings:
         llm_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
         openai_api_key = os.getenv("OPENAI_API_KEY")
         openai_base_url = parse_optional_str("OPENAI_BASE_URL")
+    elif llm_provider == "qwen":
+        llm_model = os.getenv("QWEN_MODEL", "qwen-plus").strip()
+        openai_api_key = parse_optional_str("QWEN_API_KEY")
+        openai_base_url = (
+            parse_optional_str("QWEN_BASE_URL")
+            or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        )
     elif llm_provider == "amvera":
-        llm_model = os.getenv("AMVERA_LLM_MODEL", "gpt-5").strip()
+        llm_model = os.getenv("AMVERA_LLM_MODEL", "qwen3_30b").strip()
         amvera_api_key = parse_optional_str("AMVERA_LLM_API_KEY")
         amvera_base_url = parse_optional_str("AMVERA_LLM_BASE_URL")
-        amvera_fallback_model = parse_optional_str("AMVERA_LLM_FALLBACK_MODEL") or "gpt-4.1"
+        default_amvera_fallback = "qwen3_30b" if llm_model.startswith("qwen") else "gpt-4.1"
+        amvera_fallback_model = (
+            parse_optional_str("AMVERA_LLM_FALLBACK_MODEL") or default_amvera_fallback
+        )
     else:
         llm_model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip()
         gemini_api_key = parse_optional_str("GEMINI_API_KEY")
@@ -510,6 +520,11 @@ def _log_llm_runtime_settings(settings: Settings) -> None:
             logger.warning(
                 "OPENAI_BASE_URL is empty: requests will be sent to OpenAI directly."
             )
+        return
+
+    if provider == "qwen":
+        base_url = settings.openai_base_url or "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        logger.info("LLM provider=qwen model=%s base_url=%s", settings.llm_model, base_url)
         return
 
     if provider == "amvera":

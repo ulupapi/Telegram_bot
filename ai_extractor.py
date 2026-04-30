@@ -50,9 +50,10 @@ class AIExtractor:
             from google import genai
 
             self._gemini_client = genai.Client(api_key=gemini_api_key)
-        elif self.provider == "openai":
+        elif self.provider in {"openai", "qwen"}:
+            key_name = "QWEN_API_KEY" if self.provider == "qwen" else "OPENAI_API_KEY"
             if not openai_api_key:
-                raise RuntimeError("OPENAI_API_KEY is required when LLM_PROVIDER=openai")
+                raise RuntimeError(f"{key_name} is required when LLM_PROVIDER={self.provider}")
             from openai import OpenAI
 
             self._openai_client = OpenAI(
@@ -75,7 +76,7 @@ class AIExtractor:
                 base_url = f"https://{base_url}"
             self._amvera_base_url = base_url.rstrip("/")
         else:
-            raise RuntimeError("LLM_PROVIDER must be one of: gemini, openai, amvera")
+            raise RuntimeError("LLM_PROVIDER must be one of: gemini, openai, qwen, amvera")
 
     def extract_status(self, messages: Iterable[StoredMessage]) -> StatusReport:
         messages_list = list(messages)
@@ -85,6 +86,9 @@ class AIExtractor:
         prompt = self._build_prompt(messages_list)
         raw = self._ask_model(prompt)
         payload = self._parse_json(raw)
+        if not payload:
+            repaired_raw = self._repair_json_response(raw)
+            payload = self._parse_json(repaired_raw)
 
         done = self._to_text_list(payload.get("done"))
         in_progress = self._to_text_list(payload.get("in_progress"))
@@ -199,6 +203,37 @@ class AIExtractor:
             )
         content = response.choices[0].message.content
         return content or ""
+
+    def _repair_json_response(self, raw: str) -> str:
+        text = (raw or "").strip()
+        if not text:
+            return ""
+
+        if self.provider == "gemini":
+            return raw
+
+        repair_source = text
+        if len(repair_source) > 5000:
+            repair_source = repair_source[:5000]
+
+        repair_prompt = (
+            "Ниже ответ модели, который должен был быть строгим JSON-объектом.\n"
+            "Преобразуй его в валидный JSON-объект без markdown и без комментариев.\n"
+            "Сохрани только схему:\n"
+            "{\n"
+            '  "done": [],\n'
+            '  "in_progress": [],\n'
+            '  "blocked": [],\n'
+            '  "tasks": [{"id":"T1","title":"","description":"","deadline":"","author":"","assignee":"","status":"В ожидании"}]\n'
+            "}\n"
+            "Если часть данных отсутствует, оставь пустые массивы или пустые строки.\n\n"
+            "Исходный ответ:\n"
+            f"{repair_source}"
+        )
+        try:
+            return self._ask_model(repair_prompt)
+        except Exception:
+            return raw
 
     def _ask_amvera(self, prompt: str) -> str:
         base_url = self._amvera_base_url

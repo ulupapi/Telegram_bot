@@ -3,7 +3,7 @@
 Бот для анализа рабочих обсуждений в Telegram (личные чаты, группы, supergroup, topics):
 
 - собирает сообщения в текущем чате/ветке;
-- отправляет контекст в LLM (Gemini, OpenAI, Amvera);
+- отправляет контекст в LLM (Gemini, OpenAI, Qwen, Amvera);
 - по `/status` возвращает сводку и реестр задач:
   - Название
   - Описание
@@ -53,18 +53,50 @@
 
 ### Провайдеры LLM
 
-Поддерживаются три варианта:
+Поддерживаются четыре варианта:
 
 - `LLM_PROVIDER=gemini`
 - `LLM_PROVIDER=openai`
+- `LLM_PROVIDER=qwen` (официальный OpenAI-compatible API Qwen / DashScope)
 - `LLM_PROVIDER=amvera` (нативный API Amvera LLM)
+
+### Рекомендуемая схема для "полностью на Qwen"
+
+Если бот развернут в Amvera и вы хотите, чтобы все работало само без локального компьютера,
+рекомендуется не поднимать веса модели внутри контейнера приложения, а использовать
+`Amvera LLM Inference` с Qwen-моделью.
+
+Почему так:
+
+- тарифы приложений Amvera сейчас рассчитаны на CPU/RAM уровня приложений, а не на GPU-инференс модели;
+- Qwen внутри контейнера приложения на таких ресурсах будет либо очень медленным, либо нестабильным;
+- Amvera уже дает готовый API к Qwen, и бот умеет с ним работать напрямую.
+
+Рекомендуемые переменные:
+
+- `LLM_PROVIDER=amvera`
+- `AMVERA_LLM_API_KEY=...`
+- `AMVERA_LLM_BASE_URL=https://kong-proxy.yc.amvera.ru/api/v1`
+- `AMVERA_LLM_MODEL=qwen3_30b`
+- `AMVERA_LLM_FALLBACK_MODEL=qwen3_30b`
+
+Если нужен максимальный quality и есть квота:
+
+- `AMVERA_LLM_MODEL=qwen3_235b`
+- `AMVERA_LLM_FALLBACK_MODEL=qwen3_30b`
 
 Для `amvera` задайте:
 
 - `AMVERA_LLM_API_KEY`
 - `AMVERA_LLM_BASE_URL` (endpoint вида `.../v1`)
-- `AMVERA_LLM_MODEL` (например `gpt-5` или `gpt-4.1`; важно, чтобы по этой модели была квота)
-- `AMVERA_LLM_FALLBACK_MODEL` (опционально, например `gpt-4.1` при таймаутах `gpt-5`)
+- `AMVERA_LLM_MODEL` (рекомендуется `qwen3_30b` или `qwen3_235b`)
+- `AMVERA_LLM_FALLBACK_MODEL` (рекомендуется `qwen3_30b`)
+
+Для `qwen` задайте:
+
+- `QWEN_API_KEY`
+- `QWEN_BASE_URL` (по умолчанию используется `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`)
+- `QWEN_MODEL` (например `qwen-plus` или `qwen3-14b`)
 
 ### Хранилище
 
@@ -81,7 +113,7 @@
 
 ### Таймаут LLM
 
-Для более медленных моделей (например `gpt-5`) увеличьте:
+Для более медленных моделей (например `qwen3_235b` или `gpt-5`) увеличьте:
 
 - `LLM_TIMEOUT_SECONDS=120` (или выше)
 - при необходимости уменьшите `CONTEXT_MESSAGES_LIMIT`
